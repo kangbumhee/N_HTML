@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>아이콘 생성기</title>
+</head>
+<body>
+  <h1>네이버 블로그 HTML 변환기 - 아이콘 생성</h1>
+  <p>아래 버튼을 클릭하면 아이콘이 생성되고 자동으로 다운로드됩니다.</p>
+  <button onclick="createAllIcons()">아이콘 생성 및 다운로드</button>
+  <div id="preview"></div>
+
+  <script>
+    /**
+     * 아이콘 생성 함수
+     */
+    function createIcon(size) {
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      
+      // 배경 (그라데이션 파란색 → 보라색)
+      const gradient = ctx.createLinearGradient(0, 0, size, size);
+      gradient.addColorStop(0, '#5B7FFF');
+      gradient.addColorStop(1, '#8B5CF6');
+      
+      // 둥근 사각형 배경
+      const radius = size * 0.2;
+      ctx.beginPath();
+      ctx.roundRect(0, 0, size, size, radius);
+      ctx.fillStyle = gradient;
+      ctx.fill();
+      
+      // 문서 아이콘 (흰색)
+      ctx.fillStyle = 'white';
+      const docX = size * 0.25;
+      const docY = size * 0.2;
+      const docW = size * 0.5;
+      const docH = size * 0.6;
+      
+      ctx.beginPath();
+      ctx.roundRect(docX, docY, docW, docH, size * 0.05);
+      ctx.fill();
+      
+      // 문서 안의 줄무늬 (회색)
+      ctx.fillStyle = '#CBD5E1';
+      const lineY = docY + size * 0.15;
+      const lineH = size * 0.04;
+      const lineGap = size * 0.08;
+      
+      for (let i = 0; i < 3; i++) {
+        const lineWidth = i === 2 ? docW * 0.5 : docW * 0.7;
+        ctx.fillRect(docX + size * 0.08, lineY + i * lineGap, lineWidth, lineH);
+      }
+      
+      // 화살표 (우하단, 초록색)
+      ctx.fillStyle = '#22C55E';
+      ctx.beginPath();
+      ctx.moveTo(size * 0.7, size * 0.55);
+      ctx.lineTo(size * 0.85, size * 0.7);
+      ctx.lineTo(size * 0.75, size * 0.7);
+      ctx.lineTo(size * 0.75, size * 0.85);
+      ctx.lineTo(size * 0.65, size * 0.85);
+      ctx.lineTo(size * 0.65, size * 0.7);
+      ctx.lineTo(size * 0.55, size * 0.7);
+      ctx.closePath();
+      ctx.fill();
+      
+      return canvas;
+    }
+
+    /**
+     * Canvas를 Blob으로 변환하여 다운로드
+     */
+    function downloadCanvas(canvas, filename) {
+      canvas.toBlob((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }, 'image/png');
+    }
+
+    /**
+     * 모든 아이콘 생성 및 다운로드
+     */
+    function createAllIcons() {
+      const sizes = [16, 48, 128];
+      const preview = document.getElementById('preview');
+      preview.innerHTML = '<h2>생성된 아이콘 미리보기:</h2>';
+      
+      sizes.forEach(size => {
+        const canvas = createIcon(size);
+        const filename = `icon${size}.png`;
+        
+        // 미리보기 추가
+        const img = document.createElement('img');
+        img.src = canvas.toDataURL();
+        img.style.width = '128px';
+        img.style.height = '128px';
+        img.style.margin = '10px';
+        img.style.border = '1px solid #ccc';
+        preview.appendChild(img);
+        
+        // 다운로드
+        setTimeout(() => {
+          downloadCanvas(canvas, filename);
+        }, size * 10); // 순차적으로 다운로드
+      });
+      
+      alert('아이콘 생성 완료! 다운로드된 파일을 icons 폴더에 저장하세요.');
+    }
+
+    // 페이지 로드 시 자동 실행 (선택사항)
+    // window.onload = () => createAllIcons();
+  </script>
+</body>
+</html>

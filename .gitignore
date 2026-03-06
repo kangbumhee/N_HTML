@@ -1,0 +1,18 @@
+# API 키, 비밀번호 등 민감 정보
+.env
+.env.local
+.env.production
+config/secrets.json
+secrets.yaml
+
+# 의존성
+node_modules/
+
+# 로그, 캐시, OS 파일
+*.log
+.cache/
+.DS_Store
+Thumbs.db
+
+# 배포용 zip (만들었다면 제외)
+*.zip

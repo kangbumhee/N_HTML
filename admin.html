@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>네이버 블로그 변환기 - 관리자</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    
+    /* 헤더 */
+    .header {
+      background: rgba(255,255,255,0.95);
+      border-radius: 16px;
+      padding: 24px 32px;
+      margin-bottom: 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+    }
+    
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    
+    .logo {
+      font-size: 32px;
+    }
+    
+    .header h1 {
+      font-size: 24px;
+      color: #1f2937;
+    }
+    
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    
+    .admin-badge {
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+      color: white;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    
+    .admin-email {
+      color: #6b7280;
+      font-size: 14px;
+    }
+    
+    .logout-btn {
+      background: #ef4444;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+    
+    .logout-btn:hover {
+      background: #dc2626;
+    }
+    
+    /* 통계 카드 */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    
+    .stat-card {
+      background: rgba(255,255,255,0.95);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+    }
+    
+    .stat-card .label {
+      color: #6b7280;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    
+    .stat-card .value {
+      font-size: 32px;
+      font-weight: 700;
+      color: #1f2937;
+    }
+    
+    .stat-card .value.blue { color: #3b82f6; }
+    .stat-card .value.green { color: #22c55e; }
+    .stat-card .value.purple { color: #8b5cf6; }
+    .stat-card .value.orange { color: #f59e0b; }
+    
+    /* 메인 패널 */
+    .main-panel {
+      background: rgba(255,255,255,0.95);
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+    
+    /* 탭 */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #e5e7eb;
+      background: #f9fafb;
+    }
+    
+    .tab {
+      padding: 16px 24px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: #6b7280;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    
+    .tab:hover {
+      color: #1f2937;
+      background: #f3f4f6;
+    }
+    
+    .tab.active {
+      color: #5b7fff;
+      border-bottom-color: #5b7fff;
+      background: white;
+    }
+    
+    /* 툴바 */
+    .toolbar {
+      padding: 16px 24px;
+      border-bottom: 1px solid #e5e7eb;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    
+    .search-box {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #f3f4f6;
+      padding: 8px 16px;
+      border-radius: 8px;
+      flex: 1;
+      max-width: 400px;
+    }
+    
+    .search-box input {
+      border: none;
+      background: transparent;
+      outline: none;
+      font-size: 14px;
+      width: 100%;
+    }
+    
+    .filter-group {
+      display: flex;
+      gap: 8px;
+    }
+    
+    .filter-btn {
+      padding: 8px 16px;
+      border: 1px solid #e5e7eb;
+      background: white;
+      border-radius: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .filter-btn:hover, .filter-btn.active {
+      border-color: #5b7fff;
+      color: #5b7fff;
+      background: #eff6ff;
+    }
+    
+    .refresh-btn {
+      padding: 8px 16px;
+      background: #5b7fff;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.2s;
+    }
+    
+    .refresh-btn:hover {
+      background: #4a6fee;
+    }
+    
+    /* 테이블 */
+    .table-container {
+      overflow-x: auto;
+    }
+    
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    
+    th, td {
+      padding: 14px 16px;
+      text-align: left;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    
+    th {
+      background: #f9fafb;
+      font-weight: 600;
+      font-size: 13px;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    
+    .memo-cell {
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #6b7280;
+      font-size: 13px;
+    }
+    
+    tr:hover {
+      background: #f9fafb;
+    }
+    
+    .user-cell {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    
+    .user-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #e5e7eb;
+    }
+    
+    .user-info .email {
+      font-weight: 500;
+      color: #1f2937;
+    }
+    
+    .user-info .name {
+      font-size: 12px;
+      color: #6b7280;
+    }
+    
+    /* 배지 */
+    .badge {
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    
+    .badge.master {
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+      color: white;
+    }
+    
+    .badge.pro {
+      background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+      color: white;
+    }
+    
+    .badge.free {
+      background: #e5e7eb;
+      color: #6b7280;
+    }
+    
+    .badge.active {
+      background: #dcfce7;
+      color: #16a34a;
+    }
+    
+    .badge.inactive {
+      background: #fee2e2;
+      color: #dc2626;
+    }
+    
+    /* 사용량 바 */
+    .usage-bar {
+      width: 100px;
+      height: 8px;
+      background: #e5e7eb;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    
+    .usage-bar .fill {
+      height: 100%;
+      background: linear-gradient(90deg, #22c55e, #16a34a);
+      border-radius: 4px;
+      transition: width 0.3s;
+    }
+    
+    .usage-bar .fill.warning {
+      background: linear-gradient(90deg, #f59e0b, #d97706);
+    }
+    
+    .usage-bar .fill.danger {
+      background: linear-gradient(90deg, #ef4444, #dc2626);
+    }
+    
+    .usage-text {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+    
+    /* 액션 버튼 */
+    .action-btns {
+      display: flex;
+      gap: 6px;
+    }
+    
+    .action-btn {
+      padding: 6px 10px;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .action-btn.edit {
+      background: #eff6ff;
+      color: #3b82f6;
+    }
+    
+    .action-btn.edit:hover {
+      background: #3b82f6;
+      color: white;
+    }
+    
+    .action-btn.delete {
+      background: #fee2e2;
+      color: #ef4444;
+    }
+    
+    .action-btn.delete:hover {
+      background: #ef4444;
+      color: white;
+    }
+    
+    /* 모달 */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s;
+    }
+    
+    .modal-overlay.show {
+      opacity: 1;
+      visibility: visible;
+    }
+    
+    .modal {
+      background: white;
+      border-radius: 16px;
+      padding: 24px;
+      width: 100%;
+      max-width: 500px;
+      max-height: 90vh;
+      overflow-y: auto;
+      transform: translateY(20px);
+      transition: transform 0.3s;
+    }
+    
+    .modal-overlay.show .modal {
+      transform: translateY(0);
+    }
+    
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    
+    .modal-header h2 {
+      font-size: 18px;
+      color: #1f2937;
+    }
+    
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 24px;
+      cursor: pointer;
+      color: #6b7280;
+    }
+    
+    .form-group {
+      margin-bottom: 16px;
+    }
+    
+    .form-group label {
+      display: block;
+      font-size: 14px;
+      font-weight: 500;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+    
+    .form-group input,
+    .form-group select {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    
+    .form-group input:focus,
+    .form-group select:focus {
+      border-color: #5b7fff;
+    }
+    
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid #e5e7eb;
+    }
+    
+    .btn {
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .btn-secondary {
+      background: #f3f4f6;
+      border: 1px solid #d1d5db;
+      color: #374151;
+    }
+    
+    .btn-secondary:hover {
+      background: #e5e7eb;
+    }
+    
+    .btn-primary {
+      background: #5b7fff;
+      border: none;
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      background: #4a6fee;
+    }
+    
+    .btn-danger {
+      background: #ef4444;
+      border: none;
+      color: white;
+    }
+    
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+    
+    /* 로딩 */
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 60px;
+      color: #6b7280;
+    }
+    
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #e5e7eb;
+      border-top-color: #5b7fff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    /* 빈 상태 */
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #6b7280;
+    }
+    
+    .empty-state .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    
+    /* 로그인 화면 */
+    .login-screen {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: calc(100vh - 40px);
+    }
+    
+    .login-box {
+      background: white;
+      border-radius: 16px;
+      padding: 40px;
+      text-align: center;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+      max-width: 400px;
+      width: 100%;
+    }
+    
+    .login-box .logo {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    
+    .login-box h1 {
+      font-size: 24px;
+      color: #1f2937;
+      margin-bottom: 8px;
+    }
+    
+    .login-box p {
+      color: #6b7280;
+      margin-bottom: 24px;
+    }
+    
+    .google-login-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      padding: 12px;
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .google-login-btn:hover {
+      background: #f9fafb;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    
+    .google-login-btn img {
+      width: 18px;
+      height: 18px;
+    }
+    
+    .access-denied {
+      background: #fee2e2;
+      color: #dc2626;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 16px;
+      font-size: 14px;
+    }
+    
+    /* 토스트 */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      padding: 12px 24px;
+      background: #1f2937;
+      color: white;
+      border-radius: 8px;
+      font-size: 14px;
+      z-index: 2000;
+      transform: translateY(100px);
+      opacity: 0;
+      transition: all 0.3s;
+    }
+    
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+    
+    .toast.success {
+      background: #22c55e;
+    }
+    
+    .toast.error {
+      background: #ef4444;
+    }
+    
+    /* 페이지네이션 */
+    .pagination {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      padding: 20px;
+      border-top: 1px solid #e5e7eb;
+    }
+    
+    .page-btn {
+      padding: 8px 14px;
+      border: 1px solid #e5e7eb;
+      background: white;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .page-btn:hover:not(:disabled) {
+      border-color: #5b7fff;
+      color: #5b7fff;
+    }
+    
+    .page-btn.active {
+      background: #5b7fff;
+      color: white;
+      border-color: #5b7fff;
+    }
+    
+    .page-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <div class="container" id="app">
+    <!-- 로딩 중 -->
+    <div class="loading" id="loading">
+      <div class="spinner"></div>
+    </div>
+  </div>
+  
+  <!-- 사용자 편집 모달 -->
+  <div class="modal-overlay" id="editModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>👤 사용자 설정</h2>
+        <button class="modal-close" id="modalCloseBtn">&times;</button>
+      </div>
+      
+      <div class="modal-body">
+        <div class="form-group">
+          <label>이메일</label>
+          <input type="email" id="modalEmail" readonly style="background: #f3f4f6;">
+        </div>
+        
+        <div class="form-group">
+          <label>플랜</label>
+          <select id="modalPlan">
+            <option value="free">무료 (Free)</option>
+            <option value="pro">프로 (Pro)</option>
+            <option value="master">마스터 (Master)</option>
+          </select>
+        </div>
+        
+        <div class="form-row">
+          <div class="form-group">
+            <label>일일 제한</label>
+            <select id="modalLimit">
+              <option value="3">3회</option>
+              <option value="5">5회</option>
+              <option value="10">10회</option>
+              <option value="30">30회</option>
+              <option value="100">100회</option>
+              <option value="-1">무제한</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label>오늘 사용량 초기화</label>
+            <button class="btn btn-secondary" style="width:100%;" id="resetUsageBtn">🔄 초기화</button>
+          </div>
+        </div>
+        
+        <div class="form-group">
+          <label>무제한 기간 설정</label>
+          <div class="form-row">
+            <input type="date" id="modalUnlimitedStart" placeholder="시작일">
+            <input type="date" id="modalUnlimitedEnd" placeholder="종료일">
+          </div>
+          <p style="font-size: 12px; color: #6b7280; margin-top: 6px;">
+            기간 설정 시 해당 기간 동안 무제한 사용 가능
+          </p>
+        </div>
+        
+        <div class="form-group">
+          <label>메모</label>
+          <input type="text" id="modalMemo" placeholder="관리용 메모 (선택)">
+        </div>
+      </div>
+      
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="modalCancelBtn">취소</button>
+        <button class="btn btn-primary" id="modalSaveBtn">💾 저장</button>
+      </div>
+    </div>
+  </div>
+  
+  <!-- 토스트 -->
+  <div class="toast" id="toast"></div>
+  
+  <script src="admin.js"></script>
+</body>
+</html>

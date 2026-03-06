@@ -1,0 +1,2690 @@
+/**
+ * 네이버 블로그 HTML 변환기 - Content Script
+ * 
+ * 주요 기능:
+ * - 플로팅 UI 렌더링 및 관리
+ * - HTML → 네이버 SE 에디터 형식 변환
+ * - 드래그 이동 및 리사이즈 기능
+ * - 사용자 인증 상태 관리
+ */
+
+(function() {
+  'use strict';
+  
+  // 중복 주입 방지
+  if (window.__naverBlogConverterInitialized) {
+    return;
+  }
+  window.__naverBlogConverterInitialized = true;
+
+  // 컬러 팔레트
+  const COLORS = {
+    primary: "#5B7FFF",
+    primaryHover: "#4A6FEE",
+    secondary: "#8B5CF6",
+    success: "#22C55E",
+    successHover: "#16A34A",
+    danger: "#F87171",
+    dangerHover: "#EF4444",
+    warning: "#FBBF24",
+    bgDark: "#1F2937",
+    bgCard: "#FFFFFF",
+    bgMain: "#F8FAFC",
+    textPrimary: "#1F2937",
+    textSecondary: "#6B7280",
+    textMuted: "#9CA3AF",
+    border: "#E5E7EB",
+    inputBg: "#F9FAFB"
+  };
+
+  // 링크 설정
+  const LINKS = {
+    kakaoChat: "https://open.kakao.com/o/ssaNogdi",
+    proUpgrade: "https://smartstore.naver.com/mumuriri/products/13099849483"
+  };
+
+  // EmailJS 설정 (무료: 월 200건)
+  const EMAILJS_CONFIG = {
+    serviceId: 'service_anhduso',      // EmailJS에서 발급받은 Service ID
+    templateId: 'template_j8v2p0m',    // EmailJS에서 발급받은 Template ID  
+    publicKey: 'frH_GVbDS8v-gcxmS'     // EmailJS에서 발급받은 Public Key
+  };
+
+  // 관리자 이메일
+  const ADMIN_EMAIL = 'kbhjjan@gmail.com';
+
+  // UI 상태
+  const UI_STATE = {
+    NOT_LOGGED_IN: 'NOT_LOGGED_IN',
+    LOGGED_IN: 'LOGGED_IN',
+    LIMIT_REACHED: 'LIMIT_REACHED'
+  };
+
+  // 전역 변수
+  let currentState = UI_STATE.NOT_LOGGED_IN;
+  let currentUser = null;
+  let currentUsage = { count: 0, limit: 3, plan: 'free' };
+  let noticeList = []; // 최근 공지 5개
+  let activeNotice = null; // 현재 활성 공지
+  let noticeExpanded = false; // 드롭다운 열림 여부
+  let container = null;
+  let isMinimized = false;
+  let isDragging = false;
+  
+  // 원본 HTML 저장 (붙여넣기 시 캡처)
+  let originalPastedHtml = '';
+  let originalPastedText = '';
+  let isResizing = false;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let resizeStartX = 0;
+  let resizeStartY = 0;
+  let resizeStartWidth = 0;
+  let resizeStartHeight = 0;
+  let resizeDirection = '';
+
+  /**
+   * UUID 생성 (SE 에디터용)
+   */
+  // ========== HTML 파싱 관련 함수들 (순서 중요!) ==========
+
+  /**
+   * 1. UUID 생성
+   */
+  function generateSeUuid() {
+    return 'SE-' + crypto.randomUUID();
+  }
+
+  /**
+   * 2. 스타일 문자열 파싱
+   */
+  function parseStyleString(styleStr) {
+    const style = {};
+    if (!styleStr) return style;
+    
+    const rules = styleStr.split(';');
+    rules.forEach(rule => {
+      const [prop, value] = rule.split(':').map(s => s?.trim());
+      if (prop && value) {
+        const camelProp = prop.replace(/-([a-z])/g, g => g[1].toUpperCase());
+        style[camelProp] = value;
+      }
+    });
+    
+    return style;
+  }
+
+  /**
+   * 3. CSS 색상을 HEX로 변환
+   */
+  function colorToHex(color) {
+    if (!color) return null;
+    
+    if (color.startsWith('#')) return color.toUpperCase();
+    
+    const rgbMatch = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (rgbMatch) {
+      const r = parseInt(rgbMatch[1]).toString(16).padStart(2, '0');
+      const g = parseInt(rgbMatch[2]).toString(16).padStart(2, '0');
+      const b = parseInt(rgbMatch[3]).toString(16).padStart(2, '0');
+      return `#${r}${g}${b}`.toUpperCase();
+    }
+    
+    const colorMap = {
+      'red': '#FF0000', 'blue': '#0000FF', 'green': '#008000',
+      'yellow': '#FFFF00', 'orange': '#FFA500', 'purple': '#800080',
+      'black': '#000000', 'white': '#FFFFFF', 'gray': '#808080',
+      'pink': '#FFC0CB', 'brown': '#A52A2A', 'cyan': '#00FFFF'
+    };
+    
+    return colorMap[color.toLowerCase()] || null;
+  }
+
+  /**
+   * 4. 폰트 크기를 SE fontSizeCode로 변환
+   */
+  function fontSizeToCode(size) {
+    if (!size) return 'fs16';
+    
+    const px = parseInt(size);
+    if (px >= 28) return 'fs28';
+    if (px >= 24) return 'fs24';
+    if (px >= 20) return 'fs20';
+    if (px >= 18) return 'fs18';
+    if (px >= 16) return 'fs16';
+    if (px >= 14) return 'fs14';
+    if (px >= 13) return 'fs13';
+    return 'fs11';
+  }
+
+  /**
+   * 5. 제목 태그를 폰트 크기로 변환
+   */
+  function headingToFontSize(tagName) {
+    const map = {
+      'H1': 'fs28', 'H2': 'fs24', 'H3': 'fs20',
+      'H4': 'fs18', 'H5': 'fs16', 'H6': 'fs14'
+    };
+    return map[tagName.toUpperCase()] || 'fs16';
+  }
+
+  /**
+   * 6. 요소에서 정렬 스타일 추출
+   */
+  function getAlignment(element) {
+    const style = element.getAttribute('style') || '';
+    if (style.includes('text-align: center') || style.includes('text-align:center')) return 'center';
+    if (style.includes('text-align: right') || style.includes('text-align:right')) return 'right';
+    return 'left';
+  }
+
+  /**
+   * 7. 텍스트 노드 생성 (createParagraph보다 먼저!)
+   */
+  function createTextNode(text, style = {}) {
+    const nodeStyle = {
+      "@ctype": "nodeStyle",
+      "fontSizeCode": style.fontSize || "fs16",
+      "fontFamily": style.fontFamily || "nanumgothic"
+    };
+    
+    if (style.bold) nodeStyle.bold = true;
+    if (style.italic) nodeStyle.italic = true;
+    if (style.underline) nodeStyle.underline = true;
+    if (style.strikeThrough) nodeStyle.strikeThrough = true;
+    if (style.color) nodeStyle.color = style.color;
+    if (style.backgroundColor) nodeStyle.backgroundColor = style.backgroundColor;
+    
+    const node = {
+      "@ctype": "textNode",
+      "id": generateSeUuid(),
+      "value": text,
+      "style": nodeStyle
+    };
+    
+    return node;
+  }
+
+  /**
+   * 8. 단락(paragraph) 생성
+   */
+  function createParagraph(nodes, align = 'left') {
+    return {
+      "@ctype": "paragraph",
+      "id": generateSeUuid(),
+      "style": {
+        "@ctype": "paragraphStyle",
+        "align": align,
+        "lineHeight": 1.8
+      },
+      "nodes": nodes.length > 0 ? nodes : [createTextNode(' ')]
+    };
+  }
+
+  /**
+   * 9. 텍스트 컴포넌트 생성
+   */
+  function createTextComponent(paragraphs) {
+    return {
+      "@ctype": "text",
+      "layout": "default",
+      "id": generateSeUuid(),
+      "value": Array.isArray(paragraphs) ? paragraphs : [paragraphs]
+    };
+  }
+
+  /**
+   * 10. 구분선 컴포넌트 생성
+   */
+  function createHorizontalLine() {
+    return {
+      "@ctype": "horizontalLine",
+      "id": generateSeUuid(),
+      "layout": "default"
+    };
+  }
+
+  /**
+   * 11. OG 링크 컴포넌트 생성
+   */
+  function createOgLinkComponent(url, text) {
+    // URL에서 도메인 추출
+    let domain = '';
+    try {
+      const urlObj = new URL(url);
+      domain = urlObj.hostname.replace('www.', '');
+    } catch (e) {
+      domain = url;
+    }
+    
+    return {
+      "@ctype": "oglink",
+      "id": generateSeUuid(),
+      "layout": "image",
+      "title": text || domain,
+      "domain": domain,
+      "link": url,
+      "thumbnail": null,
+      "description": "",
+      "video": false
+    };
+  }
+
+  /**
+   * 12. 표 컴포넌트 생성
+   */
+  function createTableComponent(rows) {
+    if (!rows || rows.length === 0) return null;
+    
+    const columnCount = rows[0].length;
+    const colWidth = Math.floor(100 / columnCount);
+    
+    return {
+      "@ctype": "table",
+      "id": generateSeUuid(),
+      "layout": "default",
+      "width": 100,
+      "columnCount": columnCount,
+      "borderStyleName": "thinLine",
+      "rows": rows.map((row, rowIndex) => ({
+        "@ctype": "tableRow",
+        "id": generateSeUuid(),
+        "cells": row.map((cell, colIndex) => ({
+          "@ctype": "tableCell",
+          "id": generateSeUuid(),
+          "colSpan": 1,
+          "rowSpan": 1,
+          "width": colWidth,
+          "height": 43,
+          "backgroundColor": rowIndex === 0 ? "#F5F5F5" : null,
+          "verticalAlign": "middle",
+          "value": [
+            {
+              "@ctype": "paragraph",
+              "id": generateSeUuid(),
+              "style": {
+                "@ctype": "paragraphStyle",
+                "align": "left",
+                "lineHeight": 1.8
+              },
+              "nodes": [
+                {
+                  "@ctype": "textNode",
+                  "id": generateSeUuid(),
+                  "value": cell.text || "",
+                  "style": {
+                    "@ctype": "nodeStyle",
+                    "fontSizeCode": "fs16",
+                    "fontFamily": "nanumgothic",
+                    "bold": cell.style?.bold || rowIndex === 0
+                  }
+                }
+              ]
+            }
+          ]
+        }))
+      }))
+    };
+  }
+
+  /**
+   * 12. 요소에서 텍스트 노드들 추출 (재귀)
+   */
+  function extractTextNodes(element, inheritedStyle = {}) {
+    const nodes = [];
+    
+    element.childNodes.forEach(child => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const text = child.textContent;
+        if (text && text.trim()) {
+          nodes.push(createTextNode(text, inheritedStyle));
+        }
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const tagName = child.tagName.toUpperCase();
+        const childStyle = { ...inheritedStyle };
+        
+        const inlineStyle = parseStyleString(child.getAttribute('style'));
+        
+        if (tagName === 'STRONG' || tagName === 'B') childStyle.bold = true;
+        if (tagName === 'EM' || tagName === 'I') childStyle.italic = true;
+        if (tagName === 'U') childStyle.underline = true;
+        if (tagName === 'S' || tagName === 'DEL' || tagName === 'STRIKE') childStyle.strikeThrough = true;
+        
+        // A 태그는 텍스트만 추출 (OG 링크는 별도 처리)
+        if (tagName === 'A') {
+          const childNodes = extractTextNodes(child, childStyle);
+          nodes.push(...childNodes);
+          return;
+        }
+        
+        if (inlineStyle.color) childStyle.color = colorToHex(inlineStyle.color);
+        if (inlineStyle.backgroundColor) childStyle.backgroundColor = colorToHex(inlineStyle.backgroundColor);
+        if (inlineStyle.fontWeight === 'bold' || parseInt(inlineStyle.fontWeight) >= 600) childStyle.bold = true;
+        if (inlineStyle.fontStyle === 'italic') childStyle.italic = true;
+        if (inlineStyle.textDecoration?.includes('underline')) childStyle.underline = true;
+        if (inlineStyle.textDecoration?.includes('line-through')) childStyle.strikeThrough = true;
+        if (inlineStyle.fontSize) childStyle.fontSize = fontSizeToCode(inlineStyle.fontSize);
+        
+        const childNodes = extractTextNodes(child, childStyle);
+        nodes.push(...childNodes);
+      }
+    });
+    
+    return nodes;
+  }
+
+  /**
+   * 13. 테이블 요소 파싱
+   */
+  function parseTable(tableElement) {
+    const rows = [];
+    
+    tableElement.querySelectorAll('tr').forEach((tr, rowIndex) => {
+      const cells = [];
+      
+      tr.querySelectorAll('th, td').forEach(cell => {
+        const isHeader = cell.tagName === 'TH' || rowIndex === 0;
+        
+        cells.push({
+          text: cell.textContent?.trim() || "",
+          style: {
+            bold: isHeader
+          }
+        });
+      });
+      
+      if (cells.length > 0) {
+        rows.push(cells);
+      }
+    });
+    
+    return rows;
+  }
+
+  /**
+   * 14. HTML을 SE 에디터 컴포넌트 배열로 변환 (메인 함수 - 맨 마지막!)
+   */
+  function parseHtmlToComponents(html) {
+    const components = [];
+    
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const body = doc.body;
+    
+    const processNode = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent.trim();
+        if (text) {
+          const paragraph = createParagraph([createTextNode(text)]);
+          components.push(createTextComponent([paragraph]));
+        }
+        return;
+      }
+      
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      
+      const tagName = node.tagName.toUpperCase();
+      
+      // a 태그가 단독으로 있는 경우 (블록 레벨) OG 링크로 변환
+      if (tagName === 'A' && node.getAttribute('href')) {
+        const href = node.getAttribute('href');
+        const text = node.textContent.trim();
+        
+        // http:// 또는 https://로 시작하는 링크만 OG 링크로
+        if (href.startsWith('http://') || href.startsWith('https://')) {
+          components.push(createOgLinkComponent(href, text));
+          return;
+        }
+      }
+      
+      if (tagName === 'HR') {
+        components.push(createHorizontalLine());
+        return;
+      }
+      
+      if (tagName === 'TABLE') {
+        const rows = parseTable(node);
+        if (rows.length > 0) {
+          const tableComp = createTableComponent(rows);
+          if (tableComp) components.push(tableComp);
+        }
+        return;
+      }
+      
+      if (/^H[1-6]$/.test(tagName)) {
+        const textNodes = extractTextNodes(node, {
+          fontSize: headingToFontSize(tagName),
+          bold: true
+        });
+        
+        if (textNodes.length > 0) {
+          const align = getAlignment(node);
+          const paragraph = createParagraph(textNodes, align);
+          components.push(createTextComponent([paragraph]));
+        }
+        return;
+      }
+      
+      if (tagName === 'UL' || tagName === 'OL') {
+        const isOrdered = tagName === 'OL';
+        
+        node.querySelectorAll(':scope > li').forEach((li, index) => {
+          const prefix = isOrdered ? `${index + 1}. ` : '• ';
+          const textNodes = extractTextNodes(li);
+          
+          if (textNodes.length > 0) {
+            textNodes[0].value = prefix + textNodes[0].value;
+            const paragraph = createParagraph(textNodes);
+            components.push(createTextComponent([paragraph]));
+          }
+        });
+        return;
+      }
+      
+      if (tagName === 'P' || tagName === 'DIV' || tagName === 'BLOCKQUOTE') {
+        // p나 div 안에 a 태그만 있는 경우 OG 링크로 변환
+        const links = node.querySelectorAll('a[href]');
+        const textContent = node.textContent.trim();
+        
+        if (links.length > 0) {
+          // 각 링크를 OG 링크 카드로 변환
+          links.forEach(link => {
+            const href = link.getAttribute('href');
+            const linkText = link.textContent.trim();
+            
+            if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+              components.push(createOgLinkComponent(href, linkText));
+            }
+          });
+          
+          // 링크 외의 텍스트가 있으면 텍스트 컴포넌트로 추가
+          const nonLinkText = textContent.replace(/https?:\/\/[^\s]+/g, '').trim();
+          if (nonLinkText && nonLinkText !== Array.from(links).map(l => l.textContent).join('')) {
+            const textNodes = extractTextNodes(node);
+            if (textNodes.length > 0) {
+              const align = getAlignment(node);
+              const paragraph = createParagraph(textNodes, align);
+              components.push(createTextComponent([paragraph]));
+            }
+          }
+          return;
+        }
+        
+        // 링크가 없는 일반 텍스트 처리 (기존 코드 유지)
+        const textNodes = extractTextNodes(node);
+        
+        if (textNodes.length > 0) {
+          const align = getAlignment(node);
+          const paragraph = createParagraph(textNodes, align);
+          components.push(createTextComponent([paragraph]));
+        }
+        return;
+      }
+      
+      if (tagName === 'BR') {
+        return;
+      }
+      
+      // 기타 요소
+      Array.from(node.childNodes).forEach(processNode);
+    };
+    
+    Array.from(body.childNodes).forEach(processNode);
+    
+    if (components.length === 0) {
+      const text = body.textContent.trim();
+      if (text) {
+        const paragraph = createParagraph([createTextNode(text)]);
+        components.push(createTextComponent([paragraph]));
+      }
+    }
+    
+    return components;
+  }
+
+  // ========== HTML 파싱 함수 끝 ==========
+
+  // ========== 주입 스크립트 관련 ==========
+
+  let injectedScriptReady = false;
+
+  /**
+   * 페이지에 injected.js 주입
+   */
+  function injectScript() {
+    return new Promise((resolve) => {
+      if (injectedScriptReady) {
+        resolve();
+        return;
+      }
+      
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('injected.js');
+      script.onload = () => {
+        injectedScriptReady = true;
+        script.remove();
+        resolve();
+      };
+      script.onerror = (e) => {
+        resolve(); // 에러여도 계속 진행
+      };
+      
+      (document.head || document.documentElement).appendChild(script);
+    });
+  }
+
+  /**
+   * 주입된 스크립트에 요청 보내기
+   */
+  function sendToInjectedScript(action, data = {}) {
+    return new Promise((resolve, reject) => {
+      const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      
+      const handler = (event) => {
+        if (event.detail && event.detail.requestId === requestId) {
+          window.removeEventListener('nbc_response', handler);
+          
+          if (event.detail.error) {
+            reject(new Error(event.detail.error));
+          } else {
+            resolve(event.detail.result);
+          }
+        }
+      };
+      
+      window.addEventListener('nbc_response', handler);
+      
+      // 요청 전송
+      window.dispatchEvent(new CustomEvent('nbc_request', {
+        detail: { action, data, requestId }
+      }));
+      
+      // 타임아웃
+      setTimeout(() => {
+        window.removeEventListener('nbc_response', handler);
+        reject(new Error('요청 타임아웃'));
+      }, 10000);
+    });
+  }
+
+  /**
+   * Background와 메시지 통신
+   */
+  async function sendMessage(action, data = {}) {
+    try {
+      const response = await chrome.runtime.sendMessage({ action, ...data });
+      return response;
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 사용자 정보 로드
+   */
+  /**
+   * 사용자 정보 로드
+   */
+  async function loadUser() {
+    try {
+      const response = await sendMessage('getUser');
+      if (response.success && response.user) {
+        currentUser = response.user;
+        return true;
+      }
+    } catch (error) {
+    }
+    return false;
+  }
+
+  /**
+   * 공지사항 로드
+   */
+  async function loadNotice() {
+    try {
+      const url = 'https://firestore.googleapis.com/v1/projects/naver-blog-converter/databases/(default)/documents/notices?pageSize=5&orderBy=createdAt%20desc';
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.documents) {
+        noticeList = data.documents.map(doc => {
+          const f = doc.fields || {};
+          const docPath = doc.name.split('/');
+          return {
+            id: docPath[docPath.length - 1],
+            title: f.title?.stringValue || '',
+            message: f.message?.stringValue || '',
+            active: f.active?.booleanValue || false,
+            createdAt: f.createdAt?.stringValue || ''
+          };
+        });
+        noticeList.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        noticeList = noticeList.slice(0, 5);
+        activeNotice = noticeList.find(n => n.active) || null;
+      }
+    } catch (e) {
+      console.log('공지사항 로드 실패:', e);
+    }
+  }
+
+  /**
+   * 사용량 정보 로드
+   */
+  async function loadUsage() {
+    try {
+      const response = await sendMessage('checkUsage');
+      
+      // success가 false가 아니면 성공으로 간주
+      if (response && response.success !== false) {
+        currentUsage = {
+          count: response.count ?? response.usage?.count ?? 0,
+          limit: response.limit ?? response.usage?.limit ?? 3,
+          plan: response.plan ?? response.usage?.plan ?? 'free',
+          unlimited: response.unlimited ?? response.usage?.unlimited ?? false,
+          unlimitedEnd: response.unlimitedEnd ?? response.usage?.unlimitedEnd ?? '',
+          unlimitedStart: response.unlimitedStart ?? response.usage?.unlimitedStart ?? ''
+        };
+        return true;
+      }
+    } catch (error) {
+    }
+    return false;
+  }
+
+  /**
+   * 토스트 알림 표시
+   */
+  function showToast(message, type = 'success') {
+    const toast = document.createElement('div');
+    toast.className = `nbc-toast nbc-toast-${type}`;
+    toast.textContent = message;
+    
+    const colors = {
+      success: COLORS.success,
+      error: COLORS.danger,
+      warning: COLORS.warning
+    };
+    
+    toast.style.cssText = `
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 12px 24px;
+      background: ${colors[type]};
+      color: white;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      z-index: 2147483647;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      animation: nbc-toast-in 0.3s ease;
+    `;
+    
+    document.body.appendChild(toast);
+    
+    setTimeout(() => {
+      toast.style.animation = 'nbc-toast-out 0.3s ease';
+      setTimeout(() => toast.remove(), 300);
+    }, 2000);
+  }
+
+  /**
+   * CSS 스타일 삽입
+   */
+  function injectStyles() {
+    if (document.getElementById('nbc-styles')) {
+      return;
+    }
+
+    const style = document.createElement('style');
+    style.id = 'nbc-styles';
+    style.textContent = `
+      @keyframes nbc-toast-in {
+        from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+        to { opacity: 1; transform: translateX(-50%) translateY(0); }
+      }
+      @keyframes nbc-toast-out {
+        from { opacity: 1; }
+        to { opacity: 0; }
+      }
+      
+      #nbc-container {
+        position: fixed;
+        top: 50px;
+        right: 50px;
+        width: 480px;
+        min-width: 400px;
+        min-height: 350px;
+        max-width: 90vw;
+        max-height: 90vh;
+        background: ${COLORS.bgCard};
+        border-radius: 16px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+        z-index: 2147483646;
+        font-family: system-ui, -apple-system, 'Malgun Gothic', sans-serif;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid ${COLORS.border};
+      }
+      
+      #nbc-container.nbc-minimized {
+        height: auto !important;
+        min-height: auto !important;
+      }
+      
+      #nbc-container.nbc-minimized .nbc-content {
+        display: none !important;
+      }
+      
+      #nbc-container.nbc-minimized .nbc-resize-handle {
+        display: none !important;
+      }
+      
+      .nbc-header {
+        background: linear-gradient(135deg, ${COLORS.primary}, ${COLORS.secondary});
+        padding: 14px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        cursor: move;
+        user-select: none;
+      }
+      
+      .nbc-title {
+        color: white;
+        font-size: 15px;
+        font-weight: 600;
+      }
+      
+      .nbc-header-btns {
+        display: flex;
+        gap: 6px;
+      }
+      
+      .nbc-header-btns button {
+        background: rgba(255,255,255,0.2);
+        border: none;
+        color: white;
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 16px;
+        transition: background 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      
+      .nbc-header-btns button:hover {
+        background: rgba(255,255,255,0.3);
+      }
+      
+      .nbc-content {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        overflow: hidden;
+      }
+      
+      .nbc-user-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        background: ${COLORS.bgMain};
+        border-bottom: 1px solid ${COLORS.border};
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      
+      .nbc-user-info {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      
+      .nbc-user-avatar {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+      }
+      
+      .nbc-user-email {
+        font-size: 13px;
+        color: ${COLORS.textPrimary};
+        font-weight: 500;
+      }
+      
+      .nbc-usage-info {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: ${COLORS.textSecondary};
+      }
+      
+      .nbc-usage-dots {
+        display: flex;
+        gap: 4px;
+      }
+      
+      .nbc-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+      
+      .nbc-dot.filled {
+        background: ${COLORS.success};
+      }
+      
+      .nbc-dot.empty {
+        background: ${COLORS.border};
+      }
+      
+      .nbc-pro-status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: linear-gradient(135deg, #f5f3ff, #ede9fe);
+        border-radius: 8px;
+        font-size: 13px;
+      }
+      .nbc-plan-badge {
+        color: #fff;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 4px;
+        letter-spacing: 0.5px;
+      }
+      .nbc-pro-unlimited {
+        color: #6d28d9;
+        font-weight: 600;
+      }
+      .nbc-pro-expire {
+        color: #8b8b8b;
+        font-size: 12px;
+        margin-left: auto;
+      }
+      
+      .nbc-notice-wrapper {
+        position: relative;
+        margin-bottom: 8px;
+      }
+      .nbc-notice-bar {
+        background: #1a1a2e;
+        border-radius: 4px;
+        padding: 8px 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        overflow: hidden;
+      }
+      .nbc-notice-badge {
+        background: #ff4757;
+        color: #fff;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 3px;
+        flex-shrink: 0;
+      }
+      .nbc-notice-title {
+        color: #ffd700;
+        font-size: 12px;
+        font-weight: 700;
+        flex-shrink: 0;
+        max-width: 100px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .nbc-notice-divider {
+        color: #555;
+        font-size: 12px;
+        flex-shrink: 0;
+      }
+      .nbc-notice-scroll-area {
+        flex: 1;
+        overflow: hidden;
+      }
+      .nbc-notice-msg {
+        color: #e0e0e0;
+        font-size: 12px;
+        white-space: nowrap;
+        display: inline-block;
+        animation: nbc-scroll 10s linear infinite;
+      }
+      .nbc-notice-arrow {
+        color: #888;
+        font-size: 10px;
+        flex-shrink: 0;
+        transition: transform 0.2s;
+      }
+      .nbc-notice-arrow.open {
+        transform: rotate(180deg);
+      }
+      .nbc-notice-link {
+        color: #ffd700 !important;
+        text-decoration: underline !important;
+      }
+      .nbc-notice-link:hover {
+        color: #fff !important;
+      }
+      .nbc-notice-dropdown {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: #1a1a2e;
+        border-radius: 0 0 4px 4px;
+        border-top: 1px solid #333;
+        max-height: 200px;
+        overflow-y: auto;
+        z-index: 100;
+      }
+      .nbc-notice-item {
+        padding: 8px 12px;
+        border-bottom: 1px solid #2a2a3e;
+        cursor: pointer;
+      }
+      .nbc-notice-item:last-child {
+        border-bottom: none;
+      }
+      .nbc-notice-item:hover {
+        background: #2a2a3e;
+      }
+      .nbc-notice-item.active {
+        border-left: 3px solid #ff4757;
+      }
+      .nbc-notice-item-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .nbc-notice-item-title {
+        color: #ffd700;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .nbc-notice-item-date {
+        color: #666;
+        font-size: 10px;
+      }
+      .nbc-notice-item-body {
+        margin-top: 6px;
+        color: #ccc;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      .nbc-notice-item-body a {
+        color: #ffd700 !important;
+      }
+      @keyframes nbc-scroll {
+        0% { transform: translateX(100%); }
+        100% { transform: translateX(-100%); }
+      }
+      
+      .nbc-logout-btn {
+        background: transparent;
+        border: 1px solid ${COLORS.border};
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 11px;
+        color: ${COLORS.textSecondary};
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      .nbc-logout-btn:hover {
+        background: ${COLORS.danger};
+        color: white;
+        border-color: ${COLORS.danger};
+      }
+      
+      .nbc-input-area {
+        flex: 1;
+        padding: 16px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      
+      .nbc-input {
+        width: 100%;
+        flex: 1;
+        min-height: 150px;
+        padding: 12px;
+        border: 1px solid ${COLORS.border};
+        border-radius: 8px;
+        background: ${COLORS.inputBg};
+        font-size: 14px;
+        line-height: 1.6;
+        color: ${COLORS.textPrimary};
+        overflow-y: auto;
+        outline: none;
+        transition: border-color 0.2s;
+        box-sizing: border-box;
+      }
+      
+      .nbc-input::-webkit-scrollbar {
+        width: 8px;
+      }
+      
+      .nbc-input::-webkit-scrollbar-track {
+        background: #f1f1f1;
+        border-radius: 4px;
+      }
+      
+      .nbc-input::-webkit-scrollbar-thumb {
+        background: #c1c1c1;
+        border-radius: 4px;
+      }
+      
+      .nbc-input::-webkit-scrollbar-thumb:hover {
+        background: #a1a1a1;
+      }
+      
+      .nbc-input:focus {
+        border-color: ${COLORS.primary};
+      }
+      
+      .nbc-input:empty:before {
+        content: attr(data-placeholder);
+        color: ${COLORS.textMuted};
+      }
+      
+      .nbc-preview-bar {
+        padding: 10px 16px;
+        background: ${COLORS.bgMain};
+        font-size: 12px;
+        color: ${COLORS.textSecondary};
+        border-top: 1px solid ${COLORS.border};
+      }
+      
+      .nbc-actions {
+        display: flex;
+        justify-content: space-between;
+        padding: 12px 16px;
+        gap: 12px;
+      }
+      
+      .nbc-btn-clear {
+        padding: 10px 20px;
+        border: 1px solid ${COLORS.border};
+        background: white;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 500;
+        color: ${COLORS.textSecondary};
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      .nbc-btn-clear:hover {
+        background: ${COLORS.bgMain};
+      }
+      
+      .nbc-btn-convert {
+        flex: 1;
+        padding: 10px 20px;
+        border: none;
+        background: linear-gradient(135deg, ${COLORS.success}, ${COLORS.successHover});
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        color: white;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      .nbc-btn-convert:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
+      }
+      
+      .nbc-btn-convert:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+      }
+      
+      .nbc-footer {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        border-top: 1px solid ${COLORS.border};
+        font-size: 12px;
+      }
+      
+      .nbc-footer a {
+        color: ${COLORS.textSecondary};
+        text-decoration: none;
+        transition: color 0.2s;
+      }
+      
+      .nbc-footer a:hover {
+        color: ${COLORS.primary};
+      }
+      
+      .nbc-divider {
+        color: ${COLORS.border};
+      }
+      
+      .nbc-resize-handle {
+        position: absolute;
+        z-index: 10;
+        background: transparent;
+      }
+      
+      .nbc-resize-e { right: 0; top: 50px; bottom: 10px; width: 6px; cursor: ew-resize; }
+      .nbc-resize-w { left: 0; top: 50px; bottom: 10px; width: 6px; cursor: ew-resize; }
+      .nbc-resize-s { bottom: 0; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+      .nbc-resize-n { top: 50px; left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+      .nbc-resize-se { right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize; }
+      .nbc-resize-sw { left: 0; bottom: 0; width: 16px; height: 16px; cursor: nesw-resize; }
+      .nbc-resize-ne { right: 0; top: 50px; width: 16px; height: 16px; cursor: nesw-resize; }
+      .nbc-resize-nw { left: 0; top: 50px; width: 16px; height: 16px; cursor: nwse-resize; }
+      
+      .nbc-login-screen {
+        padding: 40px 30px;
+        text-align: center;
+      }
+      
+      .nbc-logo {
+        font-size: 48px;
+        margin-bottom: 16px;
+      }
+      
+      .nbc-login-screen h1 {
+        font-size: 20px;
+        color: ${COLORS.textPrimary};
+        margin: 0 0 8px 0;
+      }
+      
+      .nbc-desc {
+        font-size: 13px;
+        color: ${COLORS.textSecondary};
+        line-height: 1.6;
+        margin-bottom: 24px;
+      }
+      
+      .nbc-google-login-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        width: 100%;
+        padding: 12px;
+        background: white;
+        border: 1px solid ${COLORS.border};
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        color: ${COLORS.textPrimary};
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      .nbc-google-login-btn:hover {
+        background: ${COLORS.bgMain};
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      }
+      
+      .nbc-google-login-btn img {
+        width: 18px;
+        height: 18px;
+      }
+      
+      .nbc-features {
+        margin: 24px 0;
+        font-size: 13px;
+        color: ${COLORS.textSecondary};
+      }
+      
+      .nbc-features p {
+        margin: 6px 0;
+      }
+      
+      .nbc-footer-links {
+        margin-top: 16px;
+      }
+      
+      .nbc-footer-links a {
+        color: ${COLORS.textSecondary};
+        text-decoration: none;
+        font-size: 12px;
+        transition: color 0.2s;
+      }
+      
+      .nbc-footer-links a:hover {
+        color: ${COLORS.primary};
+      }
+      
+      .nbc-limit-screen {
+        padding: 40px 30px;
+        text-align: center;
+      }
+      
+      .nbc-limit-header {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      
+      .nbc-limit-header-btn {
+        background: transparent;
+        border: 1px solid #e5e7eb;
+        border-radius: 6px;
+        width: 32px;
+        height: 32px;
+        cursor: pointer;
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s;
+      }
+      
+      .nbc-limit-header-btn:hover {
+        background: #f3f4f6;
+      }
+      
+      .nbc-limit-icon {
+        font-size: 48px;
+        margin-bottom: 16px;
+      }
+      
+      .nbc-limit-screen h2 {
+        font-size: 18px;
+        color: ${COLORS.textPrimary};
+        margin: 0 0 8px 0;
+      }
+      
+      .nbc-limit-screen p {
+        font-size: 13px;
+        color: ${COLORS.textSecondary};
+        margin-bottom: 24px;
+      }
+      
+      .nbc-pro-upgrade-btn {
+        width: 100%;
+        padding: 12px;
+        background: linear-gradient(135deg, ${COLORS.secondary}, #7C3AED);
+        border: none;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        color: white;
+        cursor: pointer;
+        margin-bottom: 16px;
+        transition: all 0.2s;
+      }
+      
+      .nbc-pro-upgrade-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+      }
+      
+      .nbc-kakao-link {
+        display: inline-block;
+        margin-top: 16px;
+        padding: 12px 24px;
+        background: #FEE500;
+        color: #000000;
+        text-decoration: none;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        transition: all 0.2s;
+      }
+      
+      .nbc-kakao-link:hover {
+        background: #E6CF00;
+        transform: translateY(-2px);
+      }
+      
+      /* 소진 화면 링크 영역 */
+      .nbc-limit-links {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-top: 16px;
+        align-items: center;
+      }
+      
+      /* 인라인 의견보내기 버튼 */
+      .nbc-feedback-inline-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 12px 24px;
+        background: linear-gradient(135deg, #667eea, #764ba2);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      .nbc-feedback-inline-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+      }
+      
+      .nbc-feedback-inline-btn .icon {
+        font-size: 16px;
+        animation: nbc-pulse 2s ease-in-out infinite;
+      }
+      
+      /* 푸터 의견보내기 버튼 */
+      .nbc-footer-feedback-btn {
+        background: none;
+        border: none;
+        color: ${COLORS.textSecondary};
+        font-size: 12px;
+        cursor: pointer;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        transition: color 0.2s;
+      }
+      
+      .nbc-footer-feedback-btn:hover {
+        color: ${COLORS.primary};
+      }
+      
+      .nbc-feedback-icon {
+        animation: nbc-pulse 2s ease-in-out infinite;
+        display: inline-block;
+      }
+      
+      @keyframes nbc-pulse {
+        0%, 100% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.3);
+        }
+      }
+      
+      /* 피드백 모달 */
+      .nbc-feedback-modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 2147483647;
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.3s ease;
+      }
+      
+      .nbc-feedback-modal.show {
+        opacity: 1;
+        visibility: visible;
+      }
+      
+      .nbc-feedback-content {
+        background: white;
+        border-radius: 16px;
+        padding: 24px;
+        width: 90%;
+        max-width: 450px;
+        max-height: 80vh;
+        overflow-y: auto;
+        transform: translateY(20px);
+        transition: transform 0.3s ease;
+      }
+      
+      .nbc-feedback-modal.show .nbc-feedback-content {
+        transform: translateY(0);
+      }
+      
+      .nbc-feedback-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+      
+      .nbc-feedback-header h3 {
+        font-size: 18px;
+        color: #1f2937;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      
+      .nbc-feedback-close {
+        background: none;
+        border: none;
+        font-size: 24px;
+        cursor: pointer;
+        color: #6b7280;
+        padding: 0;
+        line-height: 1;
+      }
+      
+      .nbc-feedback-close:hover {
+        color: #1f2937;
+      }
+      
+      .nbc-feedback-form .form-group {
+        margin-bottom: 16px;
+      }
+      
+      .nbc-feedback-form label {
+        display: block;
+        font-size: 14px;
+        font-weight: 500;
+        color: #374151;
+        margin-bottom: 6px;
+      }
+      
+      .nbc-feedback-form select,
+      .nbc-feedback-form textarea {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        font-size: 14px;
+        outline: none;
+        transition: border-color 0.2s;
+        font-family: inherit;
+      }
+      
+      .nbc-feedback-form select:focus,
+      .nbc-feedback-form textarea:focus {
+        border-color: #667eea;
+      }
+      
+      .nbc-feedback-form textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+      
+      .nbc-feedback-actions {
+        display: flex;
+        gap: 12px;
+        margin-top: 20px;
+      }
+      
+      .nbc-feedback-actions button {
+        flex: 1;
+        padding: 12px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      .nbc-feedback-cancel {
+        background: #f3f4f6;
+        border: 1px solid #d1d5db;
+        color: #374151;
+      }
+      
+      .nbc-feedback-cancel:hover {
+        background: #e5e7eb;
+      }
+      
+      .nbc-feedback-submit {
+        background: linear-gradient(135deg, #667eea, #764ba2);
+        border: none;
+        color: white;
+      }
+      
+      .nbc-feedback-submit:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+      }
+      
+      .nbc-feedback-submit:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+      }
+    `;
+    
+    document.head.appendChild(style);
+  }
+
+  /**
+   * 로그인 화면 렌더링
+   */
+  function renderLoginScreen() {
+    return `
+      <div class="nbc-login-screen">
+        <div class="nbc-logo">📝</div>
+        <h1>네이버 블로그 HTML 변환기</h1>
+        <p class="nbc-desc">HTML을 네이버 블로그 에디터 형식으로<br>자동 변환해주는 도구입니다</p>
+        
+        <button class="nbc-google-login-btn" id="nbc-google-login">
+          <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+            <g fill="#000" fill-rule="evenodd">
+              <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#4285F4"/>
+              <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z" fill="#34A853"/>
+              <path d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.951H.957C.348 6.174 0 7.55 0 9s.348 2.826.957 4.049l3.007-2.342z" fill="#FBBC05"/>
+              <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.951L3.964 7.293C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+            </g>
+          </svg>
+          Google로 로그인
+        </button>
+        
+        <div class="nbc-features">
+          <p>✨ 하루 3회 무료 사용</p>
+          <p>✨ Pro 업그레이드 시 무제한</p>
+        </div>
+        
+        <div class="nbc-footer-links">
+          <a href="${LINKS.kakaoChat}" target="_blank">💬 문의하기</a>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * 메인 화면 렌더링
+   */
+  function renderMainScreen() {
+    // ✅ 사용량 초기값 처리
+    if (!currentUsage || typeof currentUsage.count !== 'number') {
+      currentUsage = { count: 0, limit: 3, plan: 'free', unlimited: false };
+    }
+
+    const isPro = currentUsage.plan === 'pro' || currentUsage.plan === 'master';
+    const isUnlimited = currentUsage.limit === -1 || currentUsage.unlimited || isPro;
+
+    let usageHTML = '';
+
+    if (isPro) {
+      const planLabel = currentUsage.plan === 'master' ? 'MASTER' : 'PRO';
+      const planColor = currentUsage.plan === 'master' ? '#e74c3c' : '#8b5cf6';
+      const endDate = currentUsage.unlimitedEnd || '';
+      
+      // ✅ 남은 일수 계산
+      let daysLeftText = '';
+      if (endDate) {
+        const now = new Date();
+        const end = new Date(endDate);
+        const diffMs = end.getTime() - now.getTime();
+        const daysLeft = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+        if (daysLeft > 0) {
+          daysLeftText = `${daysLeft}일 남음`;
+        } else {
+          daysLeftText = '만료됨';
+        }
+      }
+
+      usageHTML = `
+        <div class="nbc-pro-status">
+          <span class="nbc-plan-badge" style="background:${planColor};">${planLabel}</span>
+          <span class="nbc-pro-unlimited">무제한 이용 중</span>
+          ${daysLeftText ? `<span class="nbc-pro-expire">${daysLeftText}</span>` : ''}
+        </div>
+      `;
+    } else {
+      // ✅ Free 사용자 - 기존 점(dot) 표시
+      const remaining = Math.max(0, currentUsage.limit - currentUsage.count);
+      const usageDots = [];
+      for (let i = 0; i < currentUsage.limit; i++) {
+        usageDots.push(`<span class="nbc-dot ${i < remaining ? 'filled' : 'empty'}"></span>`);
+      }
+      const usageText = `(${remaining}/${currentUsage.limit})`;
+
+      usageHTML = `
+        <div class="nbc-usage-info">
+          <span>오늘 남은 횟수:</span>
+          <div class="nbc-usage-dots">${usageDots.join('')}</div>
+          <span class="nbc-usage-text">${usageText}</span>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="nbc-content">
+        ${activeNotice ? `
+  <div class="nbc-notice-wrapper">
+    <div class="nbc-notice-bar" id="nbc-notice-toggle">
+      <span class="nbc-notice-badge">공지</span>
+      <span class="nbc-notice-title">${activeNotice.title}</span>
+      <span class="nbc-notice-divider">|</span>
+      <div class="nbc-notice-scroll-area">
+        <span class="nbc-notice-msg">${activeNotice.message.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener" class="nbc-notice-link">$1</a>')}</span>
+      </div>
+      <span class="nbc-notice-arrow" id="nbc-notice-arrow">▼</span>
+    </div>
+    <div class="nbc-notice-dropdown" id="nbc-notice-dropdown" style="display:none;">
+      ${noticeList.map(n => `
+        <div class="nbc-notice-item ${n.id === activeNotice.id ? 'active' : ''}" data-notice-id="${n.id}">
+          <div class="nbc-notice-item-header">
+            <span class="nbc-notice-item-title">${n.title}</span>
+            <span class="nbc-notice-item-date">${n.createdAt ? new Date(n.createdAt).toLocaleDateString('ko-KR') : ''}</span>
+          </div>
+          <div class="nbc-notice-item-body" style="display:none;">
+            <p>${n.message.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener" class="nbc-notice-link">$1</a>')}</p>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  </div>
+` : ''}
+        <div class="nbc-user-bar">
+          <div class="nbc-user-info">
+            <img class="nbc-user-avatar" src="${currentUser.photoURL || ''}" alt="" onerror="this.style.display='none'">
+            <span class="nbc-user-email">${currentUser.email}</span>
+          </div>
+          ${usageHTML}
+          <button class="nbc-logout-btn" id="nbc-logout">로그아웃</button>
+        </div>
+        
+        <div class="nbc-input-area">
+          <div class="nbc-input" contenteditable="true" id="nbc-input" data-placeholder="HTML 또는 서식있는 텍스트를 붙여넣으세요..."></div>
+        </div>
+        
+        <div class="nbc-preview-bar">
+          📋 감지: <span id="nbc-stats">텍스트 0 | 표 0 | 링크 0</span>
+        </div>
+        
+        <div class="nbc-actions">
+          <button class="nbc-btn-clear" id="nbc-clear">🗑️ 지우기</button>
+          <button class="nbc-btn-convert" id="nbc-convert">📤 블로그에 삽입</button>
+        </div>
+        
+        <div class="nbc-footer">
+          <a href="${LINKS.kakaoChat}" target="_blank">💬 문의하기</a>
+          <span class="nbc-divider">│</span>
+          <button class="nbc-footer-feedback-btn" id="nbc-footer-feedback-btn">
+            <span class="nbc-feedback-icon">📝</span> 의견 보내기
+          </button>
+          ${!isPro ? `<span class="nbc-divider">│</span><a href="${LINKS.proUpgrade}" target="_blank" rel="noopener" class="nbc-pro-link">⭐ Pro 업그레이드</a>` : ''}
+        </div>
+      </div>
+      
+      <div class="nbc-resize-handle nbc-resize-e"></div>
+      <div class="nbc-resize-handle nbc-resize-w"></div>
+      <div class="nbc-resize-handle nbc-resize-s"></div>
+      <div class="nbc-resize-handle nbc-resize-n"></div>
+      <div class="nbc-resize-handle nbc-resize-se"></div>
+      <div class="nbc-resize-handle nbc-resize-sw"></div>
+      <div class="nbc-resize-handle nbc-resize-ne"></div>
+      <div class="nbc-resize-handle nbc-resize-nw"></div>
+    `;
+  }
+
+  /**
+   * 횟수 소진 화면 렌더링
+   */
+  /**
+   * 횟수 소진 화면 렌더링
+   */
+  function renderLimitScreen() {
+    return `
+      <div class="nbc-limit-screen">
+        <div class="nbc-limit-header">
+          <button id="nbc-limit-refresh" class="nbc-limit-header-btn" title="새로고침">🔄</button>
+          <button id="nbc-limit-close" class="nbc-limit-header-btn" title="닫기">✕</button>
+        </div>
+        <div class="nbc-limit-icon">⚠️</div>
+        <h2>오늘 사용 횟수를 모두 사용했습니다</h2>
+        <p>내일 자정(00:00)에 초기화됩니다</p>
+        
+        <button class="nbc-pro-upgrade-btn" id="nbc-pro-upgrade">⭐ Pro 업그레이드 (무제한)</button>
+        
+        <div class="nbc-limit-links">
+          <a href="${LINKS.kakaoChat}" target="_blank" class="nbc-kakao-link">💬 카카오톡 문의</a>
+          <button class="nbc-feedback-inline-btn" id="nbc-limit-feedback-btn">
+            <span class="icon">📝</span>
+            <span>의견 보내기</span>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * UI 상태에 따라 화면 렌더링
+   */
+  function renderUI() {
+    if (!container) {
+      return;
+    }
+
+    let content = '';
+    let hasHeader = false;
+    
+    if (currentState === UI_STATE.NOT_LOGGED_IN) {
+      content = renderLoginScreen();
+      hasHeader = false;
+    } else if (currentState === UI_STATE.LIMIT_REACHED) {
+      content = renderLimitScreen();
+      hasHeader = false;
+    } else {
+      content = renderMainScreen();
+      hasHeader = true;
+    }
+
+    // 헤더가 있는 경우와 없는 경우를 구분하여 렌더링
+    if (hasHeader) {
+      const existingHeader = container.querySelector('.nbc-header');
+      const existingContent = container.querySelector('.nbc-content');
+      
+      if (existingHeader && existingContent) {
+        // 헤더는 유지하고 내용만 교체
+        existingContent.outerHTML = content;
+      } else {
+        // 처음 렌더링하는 경우
+        container.innerHTML = `
+          <div class="nbc-header">
+            <div class="nbc-header-left">
+              <span class="nbc-title">📝 네이버 블로그 HTML 변환기</span>
+            </div>
+            <div class="nbc-header-btns">
+              <button class="nbc-btn-minimize" id="nbc-minimize">─</button>
+              <button class="nbc-btn-close" id="nbc-close">×</button>
+            </div>
+          </div>
+          ${content}
+        `;
+      }
+    } else {
+      // 헤더가 없는 경우 (로그인 화면, 횟수 소진 화면)
+      const existingHeader = container.querySelector('.nbc-header');
+      if (existingHeader) {
+        existingHeader.remove();
+      }
+      container.innerHTML = content;
+    }
+
+    // 이벤트 리스너 등록
+    attachEventListeners();
+  }
+
+  /**
+   * 이벤트 리스너 등록
+   */
+  function attachEventListeners() {
+    // Google 로그인 버튼
+    const googleLoginBtn = document.getElementById('nbc-google-login');
+    if (googleLoginBtn) {
+      googleLoginBtn.onclick = handleGoogleLogin;
+    }
+
+    // 로그아웃 버튼
+    const logoutBtn = document.getElementById('nbc-logout');
+    if (logoutBtn) {
+      logoutBtn.onclick = handleLogout;
+    }
+
+    // 지우기 버튼
+    const clearBtn = document.getElementById('nbc-clear');
+    if (clearBtn) {
+      clearBtn.onclick = () => {
+        const input = document.getElementById('nbc-input');
+        if (input) {
+          input.innerHTML = '';
+          originalPastedHtml = '';
+          originalPastedText = '';
+          updatePreview('');
+        }
+      };
+    }
+
+    // 변환 버튼
+    const convertBtn = document.getElementById('nbc-convert');
+    if (convertBtn) {
+      convertBtn.disabled = false; // 명시적으로 false
+      convertBtn.onclick = handleConvert;
+    }
+
+    // 입력 변경 감지
+    const input = document.getElementById('nbc-input');
+    if (input) {
+      // 붙여넣기 이벤트 핸들러 - 원본 HTML 캡처
+      input.addEventListener('paste', (e) => {
+        e.preventDefault();
+        
+        const clipboardData = e.clipboardData || window.clipboardData;
+        
+        let html = clipboardData.getData('text/html');
+        let text = clipboardData.getData('text/plain');
+        
+        // 코드 하이라이팅 감지 (hljs, highlight, prism, code-block 등)
+        const isCodeHighlighted = html && (
+          html.includes('hljs-') ||
+          html.includes('highlight-') ||
+          html.includes('prism-') ||
+          html.includes('code-block') ||
+          html.includes('CodeMirror') ||
+          html.includes('monaco-')
+        );
+        
+        if (isCodeHighlighted) {
+          // text/plain이 HTML 태그를 포함하면 그걸 사용
+          if (text && text.includes('<') && text.includes('>')) {
+            originalPastedHtml = text;
+          } else {
+            // 그래도 없으면 html에서 텍스트만 추출
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = html;
+            originalPastedHtml = tempDiv.textContent || tempDiv.innerText;
+          }
+        } else if (html && html.trim()) {
+          // 일반 HTML
+          originalPastedHtml = html;
+        } else if (text && text.trim()) {
+          // HTML 없으면 텍스트 사용
+          originalPastedHtml = text;
+        }
+        
+        originalPastedText = text;
+        
+        // 화면에 표시 (미리보기용)
+        if (originalPastedHtml) {
+          // HTML 파싱해서 텍스트만 표시
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = originalPastedHtml;
+          const displayText = tempDiv.textContent || tempDiv.innerText;
+          input.innerText = displayText.substring(0, 500) + (displayText.length > 500 ? '...' : '');
+          
+          updatePreview(originalPastedHtml);
+        }
+      });
+
+      // 입력 시 미리보기 업데이트 (직접 타이핑)
+      let debounceTimer;
+      input.addEventListener('input', () => {
+        // 직접 타이핑하면 원본 HTML 초기화
+        if (!originalPastedHtml) {
+          clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            const html = input.innerHTML;
+            updatePreview(html);
+          }, 300);
+        }
+      });
+
+      // 포커스 시 placeholder 처리
+      input.addEventListener('focus', () => {
+        if (input.innerText.trim() === '') {
+          input.innerHTML = '';
+        }
+      });
+    }
+
+    // 최소화 버튼
+    const minimizeBtn = document.getElementById('nbc-minimize');
+    if (minimizeBtn) {
+      minimizeBtn.addEventListener('click', () => {
+        isMinimized = !isMinimized;
+        const content = container.querySelector('.nbc-content');
+        const resizeHandles = container.querySelectorAll('.nbc-resize-handle');
+        
+        if (isMinimized) {
+          // 축소
+          if (content) content.style.display = 'none';
+          resizeHandles.forEach(h => h.style.display = 'none');
+          container.style.height = 'auto';
+          container.style.minHeight = 'auto';
+          minimizeBtn.textContent = '□';
+        } else {
+          // 확대
+          if (content) content.style.display = 'flex';
+          resizeHandles.forEach(h => h.style.display = 'block');
+          container.style.height = '';
+          container.style.minHeight = '350px';
+          minimizeBtn.textContent = '─';
+        }
+      });
+    }
+
+    // 닫기 버튼
+    const closeBtn = document.getElementById('nbc-close');
+    if (closeBtn) {
+      closeBtn.onclick = () => {
+        container.style.display = 'none';
+      };
+    }
+
+    // Pro 업그레이드 버튼
+    const proUpgradeBtn = document.getElementById('nbc-pro-upgrade');
+    if (proUpgradeBtn) {
+      proUpgradeBtn.onclick = () => {
+        window.open(LINKS.proUpgrade, '_blank', 'noopener');
+      };
+    }
+
+    // 소진 화면 새로고침 버튼
+    const limitRefreshBtn = document.getElementById('nbc-limit-refresh');
+    if (limitRefreshBtn) {
+      limitRefreshBtn.addEventListener('click', async () => {
+        // 서비스 워커에 강제 갱신 요청
+        chrome.runtime.sendMessage({ 
+          action: 'forceRefreshUsage', 
+          email: currentUser?.email 
+        }, async (response) => {
+          await updateState();
+          renderUI();
+        });
+      });
+    }
+
+    // 소진 화면 닫기 버튼
+    const limitCloseBtn = document.getElementById('nbc-limit-close');
+    if (limitCloseBtn) {
+      limitCloseBtn.addEventListener('click', () => {
+        const container = document.getElementById('nbc-container');
+        if (container) {
+          container.style.display = 'none';
+        }
+      });
+    }
+
+    // 소진 화면 의견보내기 버튼
+    const limitFeedbackBtn = document.getElementById('nbc-limit-feedback-btn');
+    if (limitFeedbackBtn) {
+      limitFeedbackBtn.addEventListener('click', openFeedbackModal);
+    }
+
+    // 푸터 의견보내기 버튼
+    const footerFeedbackBtn = document.getElementById('nbc-footer-feedback-btn');
+    if (footerFeedbackBtn) {
+      footerFeedbackBtn.addEventListener('click', openFeedbackModal);
+    }
+
+    // 공지 토글
+    const noticeToggle = document.getElementById('nbc-notice-toggle');
+    if (noticeToggle) {
+      noticeToggle.addEventListener('click', (e) => {
+        if (e.target.closest('.nbc-notice-link')) return; // 링크 클릭은 무시
+        const dropdown = document.getElementById('nbc-notice-dropdown');
+        const arrow = document.getElementById('nbc-notice-arrow');
+        if (dropdown) {
+          const isOpen = dropdown.style.display !== 'none';
+          dropdown.style.display = isOpen ? 'none' : 'block';
+          if (arrow) arrow.classList.toggle('open', !isOpen);
+        }
+      });
+    }
+
+    // 공지 아이템 클릭 (아코디언)
+    const noticeItems = document.querySelectorAll('.nbc-notice-item');
+    noticeItems.forEach(item => {
+      item.addEventListener('click', (e) => {
+        if (e.target.closest('.nbc-notice-link')) return;
+        const body = item.querySelector('.nbc-notice-item-body');
+        if (body) {
+          const isOpen = body.style.display !== 'none';
+          // 다른 것들 닫기
+          document.querySelectorAll('.nbc-notice-item-body').forEach(b => b.style.display = 'none');
+          body.style.display = isOpen ? 'none' : 'block';
+        }
+      });
+    });
+
+    // 드래그 및 리사이즈 이벤트는 별도 함수에서 처리
+    setupDragAndResize();
+  }
+
+  /**
+   * 드래그 및 리사이즈 설정
+   */
+  function setupDragAndResize() {
+    const header = container?.querySelector('.nbc-header');
+    if (!header) return;
+
+    // 드래그 시작
+    header.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.nbc-header-btns')) return;
+      isDragging = true;
+      dragStartX = e.clientX - container.offsetLeft;
+      dragStartY = e.clientY - container.offsetTop;
+      e.preventDefault();
+    });
+
+    // 리사이즈 핸들 이벤트
+    const resizeHandles = container?.querySelectorAll('.nbc-resize-handle');
+    resizeHandles?.forEach(handle => {
+      handle.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        resizeDirection = handle.className.split(' ')[1].replace('nbc-resize-', '');
+        resizeStartX = e.clientX;
+        resizeStartY = e.clientY;
+        resizeStartWidth = container.offsetWidth;
+        resizeStartHeight = container.offsetHeight;
+        e.preventDefault();
+        e.stopPropagation();
+      });
+    });
+
+    // 마우스 이동
+    document.addEventListener('mousemove', (e) => {
+      if (isDragging) {
+        const newX = e.clientX - dragStartX;
+        const newY = e.clientY - dragStartY;
+        
+        // 화면 경계 체크
+        const maxX = window.innerWidth - container.offsetWidth;
+        const maxY = window.innerHeight - container.offsetHeight;
+        
+        container.style.left = Math.max(0, Math.min(newX, maxX)) + 'px';
+        container.style.top = Math.max(0, Math.min(newY, maxY)) + 'px';
+        container.style.right = 'auto';
+        saveWindowPosition();
+      } else if (isResizing) {
+        const deltaX = e.clientX - resizeStartX;
+        const deltaY = e.clientY - resizeStartY;
+        
+        let newWidth = resizeStartWidth;
+        let newHeight = resizeStartHeight;
+        
+        if (resizeDirection.includes('e')) {
+          newWidth = resizeStartWidth + deltaX;
+        }
+        if (resizeDirection.includes('w')) {
+          newWidth = resizeStartWidth - deltaX;
+        }
+        if (resizeDirection.includes('s')) {
+          newHeight = resizeStartHeight + deltaY;
+        }
+        if (resizeDirection.includes('n')) {
+          newHeight = resizeStartHeight - deltaY;
+        }
+        
+        // 최소/최대 크기 제한
+        const minWidth = 400;
+        const minHeight = 350;
+        const maxWidth = window.innerWidth * 0.9;
+        const maxHeight = window.innerHeight * 0.9;
+        
+        newWidth = Math.max(minWidth, Math.min(newWidth, maxWidth));
+        newHeight = Math.max(minHeight, Math.min(newHeight, maxHeight));
+        
+        container.style.width = newWidth + 'px';
+        container.style.height = newHeight + 'px';
+        
+        if (resizeDirection.includes('w')) {
+          const deltaWidth = newWidth - resizeStartWidth;
+          container.style.left = (container.offsetLeft - deltaWidth) + 'px';
+        }
+        if (resizeDirection.includes('n')) {
+          const deltaHeight = newHeight - resizeStartHeight;
+          container.style.top = (container.offsetTop - deltaHeight) + 'px';
+        }
+        
+        saveWindowPosition();
+      }
+    });
+
+    // 마우스 업
+    document.addEventListener('mouseup', () => {
+      isDragging = false;
+      isResizing = false;
+    });
+  }
+
+  /**
+   * 창 위치 저장
+   */
+  async function saveWindowPosition() {
+    if (!container) return;
+    
+    const rect = container.getBoundingClientRect();
+    const position = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height
+    };
+    
+    try {
+      await chrome.storage.local.set({ 'nbc_window_position': position });
+    } catch (error) {
+    }
+  }
+
+  /**
+   * 창 위치 로드
+   */
+  async function loadWindowPosition() {
+    try {
+      const result = await chrome.storage.local.get('nbc_window_position');
+      if (result.nbc_window_position && container) {
+        const pos = result.nbc_window_position;
+        container.style.left = pos.left + 'px';
+        container.style.top = pos.top + 'px';
+        if (pos.width) container.style.width = pos.width + 'px';
+        if (pos.height) container.style.height = pos.height + 'px';
+        container.style.right = 'auto';
+      }
+    } catch (error) {
+    }
+  }
+
+  /**
+   * Google 로그인 처리
+   */
+  async function handleGoogleLogin() {
+    try {
+      showToast('로그인 중...', 'info');
+      const response = await sendMessage('login');
+      
+      if (response.success && response.user) {
+        currentUser = response.user;
+        await loadNotice();
+        await loadUsage();
+        updateState();
+        showToast('로그인 성공!', 'success');
+      } else {
+        showToast(response.error || '로그인 실패', 'error');
+      }
+    } catch (error) {
+      showToast('로그인 중 오류가 발생했습니다.', 'error');
+    }
+  }
+
+  /**
+   * 로그아웃 처리
+   */
+  async function handleLogout() {
+    try {
+      const response = await sendMessage('logout');
+      if (response.success) {
+        currentUser = null;
+        currentUsage = { count: 0, limit: 3, plan: 'free' };
+        updateState();
+        showToast('로그아웃되었습니다.', 'success');
+      }
+    } catch (error) {
+    }
+  }
+
+  /**
+   * 상태 업데이트
+   */
+  async function updateState() {
+    // 사용자 정보 확인
+    const userLoaded = await loadUser();
+    
+    if (!userLoaded || !currentUser) {
+      currentState = UI_STATE.NOT_LOGGED_IN;
+      renderUI();
+      return;
+    }
+    
+    // 사용량 확인 - 캐시 없이 항상 새로 요청
+    const response = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ 
+        action: 'checkUsage', 
+        email: currentUser.email 
+      }, resolve);
+    });
+    
+    if (response && response.success !== false) {
+      currentUsage = {
+        count: response.count ?? response.usage?.count ?? 0,
+        limit: response.limit ?? response.usage?.limit ?? 3,
+        plan: response.plan ?? response.usage?.plan ?? 'free',
+        unlimited: response.unlimited ?? response.usage?.unlimited ?? false,
+        unlimitedEnd: response.unlimitedEnd ?? response.usage?.unlimitedEnd ?? '',
+        unlimitedStart: response.unlimitedStart ?? response.usage?.unlimitedStart ?? ''
+      };
+      
+      // 상태 결정
+      if (currentUsage.unlimited || currentUsage.limit === -1) {
+        currentState = UI_STATE.LOGGED_IN;
+      } else if (currentUsage.count >= currentUsage.limit) {
+        currentState = UI_STATE.LIMIT_REACHED;
+      } else {
+        currentState = UI_STATE.LOGGED_IN;
+      }
+    } else {
+      currentUsage = { count: 0, limit: 3, plan: 'free', unlimited: false };
+      currentState = UI_STATE.LOGGED_IN;
+    }
+    
+    renderUI();
+  }
+
+  /**
+   * 미리보기 업데이트
+   */
+  /**
+   * 미리보기 업데이트 (감지된 요소 수 표시)
+   */
+  function updatePreview(html) {
+    const statsEl = document.getElementById('nbc-stats');
+    if (!statsEl) return;
+    
+    if (!html || html.trim() === '') {
+      statsEl.textContent = '텍스트 0 | 표 0 | 링크 0';
+      return;
+    }
+    
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      
+      const textCount = doc.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6, li, span').length;
+      const tableCount = doc.querySelectorAll('table').length;
+      const linkCount = doc.querySelectorAll('a[href]').length;
+      
+      statsEl.textContent = `텍스트 ${textCount} | 표 ${tableCount} | 링크 ${linkCount}`;
+    } catch (e) {
+      statsEl.textContent = '파싱 중...';
+    }
+  }
+
+  /**
+   * 네이버 블로그 글쓰기 페이지인지 확인
+   */
+  async function isNaverBlogWritePage() {
+    if (!window.location.href.includes('blog.naver.com')) {
+      return false;
+    }
+    
+    try {
+      // 주입 스크립트 로드
+      await injectScript();
+      
+      // 에디터 체크 요청
+      const result = await sendToInjectedScript('checkEditor');
+      
+      return result && result.found;
+      
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * 네이버 에디터에 컴포넌트 삽입
+   * @param {Array} components - SE 에디터 컴포넌트 배열
+   */
+  async function insertToNaverEditor(components) {
+    // 주입 스크립트 로드
+    await injectScript();
+    
+    // 삽입 요청
+    const result = await sendToInjectedScript('insertComponents', { components });
+    
+    return result;
+  }
+
+  /**
+   * 변환 처리
+   */
+  async function handleConvert() {
+    try {
+      const input = document.getElementById('nbc-input');
+      if (!input) {
+        showToast('입력 영역을 찾을 수 없습니다.', 'error');
+        return;
+      }
+      
+      // 원본 HTML 또는 입력 내용 사용
+      const htmlToConvert = originalPastedHtml || input.innerHTML;
+      
+      if (!htmlToConvert || htmlToConvert.trim() === '' || htmlToConvert === '<br>') {
+        showToast('붙여넣을 내용이 없습니다.', 'error');
+        return;
+      }
+      
+      // 네이버 블로그 페이지 체크
+      const isBlogPage = await isNaverBlogWritePage();
+      if (!isBlogPage) {
+        showToast('네이버 블로그 글쓰기 페이지에서 사용해주세요.', 'error');
+        return;
+      }
+      
+      // 사용량 확인
+      const usageResponse = await sendMessage('checkUsage');
+      if (!usageResponse || !usageResponse.success) {
+        showToast('사용량 확인 중 오류가 발생했습니다.', 'error');
+        return;
+      }
+      
+      // 무제한이 아니고 횟수 초과면 제한 화면
+      if (!usageResponse.unlimited && usageResponse.limit !== -1 && usageResponse.count >= usageResponse.limit) {
+        showToast('오늘 사용 횟수를 모두 사용했습니다.', 'error');
+        updateState();
+        return;
+      }
+      
+      // 변환 버튼 비활성화
+      const convertBtn = document.getElementById('nbc-convert');
+      if (convertBtn) {
+        convertBtn.disabled = true;
+        convertBtn.textContent = '변환 중...';
+      }
+      
+      showToast('변환 중...', 'info');
+      
+      // HTML → SE 컴포넌트 변환
+      const components = parseHtmlToComponents(htmlToConvert);
+      
+      if (components.length === 0) {
+        showToast('변환할 내용이 없습니다.', 'warning');
+        if (convertBtn) {
+          convertBtn.disabled = false;
+          convertBtn.textContent = '📤 블로그에 삽입';
+        }
+        return;
+      }
+      
+      // 네이버 에디터에 삽입
+      await insertToNaverEditor(components);
+      
+      // 사용량 증가
+      const response = await sendMessage('useConversion');
+      if (response.success) {
+        currentUsage = response.usage;
+        updateState();
+        showToast('✅ 블로그에 삽입되었습니다!', 'success');
+        
+        // 입력 영역 초기화
+        input.innerHTML = '';
+        originalPastedHtml = '';
+        originalPastedText = '';
+        updatePreview('');
+      } else {
+        showToast(response.error || '사용량 증가 실패', 'error');
+      }
+      
+      // 변환 버튼 활성화
+      if (convertBtn) {
+        convertBtn.disabled = false;
+        convertBtn.textContent = '📤 블로그에 삽입';
+      }
+      
+    } catch (error) {
+      showToast('변환 중 오류가 발생했습니다: ' + error.message, 'error');
+    } finally {
+      // 변환 버튼 항상 활성화
+      const convertBtn = document.getElementById('nbc-convert');
+      if (convertBtn) {
+        convertBtn.disabled = false;
+        convertBtn.textContent = '📤 블로그에 삽입';
+      }
+    }
+  }
+
+  /**
+   * UI 초기화
+   */
+  async function initUI() {
+    // 스타일 삽입
+    injectStyles();
+    
+    // 컨테이너 생성
+    container = document.getElementById('nbc-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'nbc-container';
+      document.body.appendChild(container);
+    }
+    
+    // 창 위치 로드
+    await loadWindowPosition();
+    
+    // 저장된 로그인 정보 자동 복원
+    await loadUser();
+    
+    // 공지사항 로드
+    await loadNotice();
+    
+    // 사용량 정보 및 상태 업데이트
+    await updateState();
+    
+    // 피드백 모달 초기화 (한 번만)
+    initFeedbackModal();
+  }
+
+  /**
+   * UI 토글
+   */
+  async function toggleUI() {
+    if (!container) {
+      await initUI();
+      return;
+    }
+    
+    if (container.style.display === 'none' || !container.style.display) {
+      // 열 때마다 상태 새로 확인
+      await updateState();
+      container.style.display = 'flex';
+    } else {
+      container.style.display = 'none';
+    }
+  }
+
+  // 메시지 리스너
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'toggleUI') {
+      toggleUI();
+      sendResponse({ success: true });
+    }
+    return true;
+  });
+
+  // 전역 함수 노출
+  window.toggleNaverBlogConverter = toggleUI;
+  
+  // 즉시 초기화 (페이지 로드 상태와 관계없이)
+  /**
+   * 피드백 모달 초기화 (한 번만 생성)
+   */
+  function initFeedbackModal() {
+    // 기존 모달 있으면 제거
+    const existingModal = document.getElementById('nbc-feedback-modal');
+    if (existingModal) existingModal.remove();
+    
+    // 피드백 모달 생성
+    const feedbackModal = document.createElement('div');
+    feedbackModal.id = 'nbc-feedback-modal';
+    feedbackModal.className = 'nbc-feedback-modal';
+    feedbackModal.innerHTML = `
+      <div class="nbc-feedback-content">
+        <div class="nbc-feedback-header">
+          <h3>💬 의견 보내기</h3>
+          <button class="nbc-feedback-close" id="nbc-feedback-close">&times;</button>
+        </div>
+        
+        <form class="nbc-feedback-form" id="nbc-feedback-form">
+          <div class="form-group">
+            <label>유형</label>
+            <select id="nbc-feedback-type">
+              <option value="bug">🐛 버그 신고</option>
+              <option value="feature">💡 기능 제안</option>
+              <option value="improve">✨ 개선 요청</option>
+              <option value="other">📝 기타 의견</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label>내용</label>
+            <textarea id="nbc-feedback-message" placeholder="의견을 자유롭게 작성해주세요..."></textarea>
+          </div>
+          
+          <div class="nbc-feedback-actions">
+            <button type="button" class="nbc-feedback-cancel" id="nbc-feedback-cancel">취소</button>
+            <button type="submit" class="nbc-feedback-submit" id="nbc-feedback-submit">보내기</button>
+          </div>
+        </form>
+      </div>
+    `;
+    document.body.appendChild(feedbackModal);
+    
+    // 이벤트 리스너
+    document.getElementById('nbc-feedback-close').addEventListener('click', () => {
+      feedbackModal.classList.remove('show');
+    });
+    
+    document.getElementById('nbc-feedback-cancel').addEventListener('click', () => {
+      feedbackModal.classList.remove('show');
+    });
+    
+    // 모달 바깥 클릭 시 닫기
+    feedbackModal.addEventListener('click', (e) => {
+      if (e.target === feedbackModal) {
+        feedbackModal.classList.remove('show');
+      }
+    });
+    
+    // 폼 제출
+    document.getElementById('nbc-feedback-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await submitFeedback();
+    });
+  }
+
+  /**
+   * 피드백 모달 열기
+   */
+  function openFeedbackModal() {
+    const feedbackModal = document.getElementById('nbc-feedback-modal');
+    if (feedbackModal) {
+      feedbackModal.classList.add('show');
+    }
+  }
+
+  /**
+   * 피드백 제출
+   */
+  async function submitFeedback() {
+    const type = document.getElementById('nbc-feedback-type').value;
+    const message = document.getElementById('nbc-feedback-message').value.trim();
+    
+    if (!message) {
+      showToast('내용을 입력해주세요.', 'error');
+      return;
+    }
+    
+    const submitBtn = document.getElementById('nbc-feedback-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = '전송 중...';
+    
+    try {
+      // 사용자 정보 가져오기
+      const userResult = await chrome.storage.local.get(['user']);
+      const userEmail = userResult.user?.email || 'anonymous';
+      
+      // 피드백 데이터 구성
+      const feedbackData = {
+        type,
+        message,
+        userEmail,
+        userAgent: navigator.userAgent,
+        url: window.location.href,
+        createdAt: new Date().toISOString()
+      };
+      
+      // Firestore에 저장
+      await saveFeedbackToFirestore(feedbackData);
+      
+      // EmailJS로 이메일 알림 전송
+      await sendFeedbackNotification(feedbackData);
+      
+      showToast('의견이 전송되었습니다. 감사합니다! 🙏', 'success');
+      
+      // 폼 초기화 및 모달 닫기
+      document.getElementById('nbc-feedback-message').value = '';
+      document.getElementById('nbc-feedback-modal').classList.remove('show');
+      
+    } catch (error) {
+      showToast('전송 실패. 다시 시도해주세요.', 'error');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '보내기';
+    }
+  }
+
+  /**
+   * Firestore에 피드백 저장
+   */
+  async function saveFeedbackToFirestore(feedback) {
+    const projectId = 'naver-blog-converter';
+    const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/feedbacks`;
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          type: { stringValue: feedback.type },
+          message: { stringValue: feedback.message },
+          userEmail: { stringValue: feedback.userEmail },
+          userAgent: { stringValue: feedback.userAgent },
+          url: { stringValue: feedback.url },
+          createdAt: { stringValue: feedback.createdAt },
+          status: { stringValue: 'new' }
+        }
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error('Firestore 저장 실패');
+    }
+    
+    return await response.json();
+  }
+
+  /**
+   * 피드백 알림 전송 (EmailJS 사용)
+   */
+  async function sendFeedbackNotification(feedback) {
+    const EMAILJS_SERVICE_ID = 'service_anhduso';
+    const EMAILJS_TEMPLATE_ID = 'template_j8v2p0m';
+    const EMAILJS_PUBLIC_KEY = 'frH_GVbDS8v-gcxmS';
+    
+    try {
+      const typeNames = {
+        bug: '🐛 버그 신고',
+        feature: '💡 기능 제안',
+        improve: '✨ 개선 요청',
+        other: '📝 기타 의견'
+      };
+      
+      const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          service_id: EMAILJS_SERVICE_ID,
+          template_id: EMAILJS_TEMPLATE_ID,
+          user_id: EMAILJS_PUBLIC_KEY,
+          template_params: {
+            title: '새로운 피드백',
+            feedback_type: typeNames[feedback.type] || feedback.type,
+            from_name: feedback.userEmail,
+            from_email: feedback.userEmail,
+            timestamp: new Date(feedback.createdAt).toLocaleString('ko-KR'),
+            message: feedback.message
+          }
+        })
+      });
+      
+    } catch (error) {
+    }
+  }
+
+})();
