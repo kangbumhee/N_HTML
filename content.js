@@ -779,7 +779,7 @@
   }
 
   /**
-   * 15. 다크 테마 전용 파서
+   * 15. 다크 테마 전용 파서 — 모든 콘텐츠를 단일 megaCell에 넣어 모바일 흰줄 제거
    */
   function parseDarkThemeToComponents(html, cssVars) {
     const parser = new DOMParser();
@@ -791,58 +791,161 @@
     const accent2Color = cssVars['--accent2'] || '#7ee8a2';
     const textColor = cssVars['--text'] || '#e8eaf0';
     const mutedColor = cssVars['--muted'] || '#8891a8';
+    const warnColor = cssVars['--warn'] || '#f7c948';
+    const borderColor = cssVars['--border'] || '#252b3b';
+    const cardBgColor = cssVars['--card-bg'] || '#181c28';
 
-    const components = [];
-    let currentBlock = [];
+    // 모든 paragraph를 이 배열에 모은다 (하나의 megaCell로 만들 것)
+    const allParagraphs = [];
 
-    function makeSpacer() {
+    // ── 헬퍼 함수들 ──
+
+    function uid() { return generateSeUuid(); }
+
+    function tn(text, opts) {
+      opts = opts || {};
+      const style = {
+        "@ctype": "nodeStyle",
+        "fontSizeCode": opts.fs || "fs16",
+        "fontFamily": "nanumgothic"
+      };
+      if (opts.bold) style.bold = true;
+      if (opts.italic) style.italic = true;
+      if (opts.underline) style.underline = true;
+      if (opts.strikeThrough) style.strikeThrough = true;
+      if (opts.fc) style.fontColor = opts.fc;
+      if (opts.bc) style.backgroundColor = opts.bc;
+      return { "@ctype": "textNode", "id": uid(), "value": text, "style": style };
+    }
+
+    function pg(nodes, align, lh) {
       return {
         "@ctype": "paragraph",
-        "id": generateSeUuid(),
-        "style": {"@ctype": "paragraphStyle", "align": "left", "lineHeight": 2.0},
-        "nodes": [{
-          "@ctype": "textNode",
-          "id": generateSeUuid(),
-          "value": "\u00A0",
-          "style": {"@ctype": "nodeStyle", "fontSizeCode": "fs15", "fontFamily": "nanumgothic", "fontColor": bgColor}
-        }]
+        "id": uid(),
+        "style": { "@ctype": "paragraphStyle", "align": align || "left", "lineHeight": lh || 1.8 },
+        "nodes": (nodes && nodes.length > 0) ? nodes : [tn("\u00A0", {fs: "fs15", fc: bgColor})]
       };
     }
 
-    function makeParagraph(nodes, align, lh) {
-      return {
-        "@ctype": "paragraph",
-        "id": generateSeUuid(),
-        "style": {"@ctype": "paragraphStyle", "align": align || "left", "lineHeight": lh || 2.0},
-        "nodes": nodes.length > 0 ? nodes : [{
-          "@ctype": "textNode",
-          "id": generateSeUuid(),
-          "value": "\u00A0",
-          "style": {"@ctype": "nodeStyle", "fontSizeCode": "fs15", "fontFamily": "nanumgothic"}
-        }]
-      };
+    function spacer() {
+      return pg([tn("\u00A0", {fs: "fs15", fc: bgColor})]);
     }
 
-    function flushBlock() {
-      if (currentBlock.length > 0) {
-        components.push(createDarkBlock(currentBlock, cssVars));
-        currentBlock = [];
-      }
+    function hrLine() {
+      return pg([tn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", {fs: "fs15", fc: borderColor})]);
     }
 
-    function getElementColor(el) {
-      const style = parseStyleString(el.getAttribute('style'));
-      if (style.color) {
-        return colorToHex(resolveCssVar(style.color, cssVars));
-      }
-      return null;
+    // 경고/인용 박스를 paragraph로 만듦 (┃ 문자 사용)
+    function warnParagraph(text, color) {
+      color = color || warnColor;
+      return pg([
+        tn("┃ ", {fs: "fs15", fc: color, bold: true}),
+        tn(text, {fs: "fs15", fc: "#c8ccd8"})
+      ]);
     }
+
+    // 테이블을 텍스트 카드형 paragraph 배열로 변환
+    function tableToCardParagraphs(tableElement) {
+      const paras = [];
+      const rows = [];
+      tableElement.querySelectorAll('tr').forEach(tr => {
+        const cells = [];
+        tr.querySelectorAll('th, td').forEach(cell => {
+          cells.push(cell.textContent.trim());
+        });
+        if (cells.length > 0) rows.push(cells);
+      });
+
+      if (rows.length === 0) return paras;
+
+      // 헤더 행
+      const headers = rows[0];
+
+      // 헤더 행을 paragraph로
+      paras.push(spacer());
+      const headerNodes = [];
+      headers.forEach((h, i) => {
+        if (i > 0) headerNodes.push(tn("  ┃  ", {fs: "fs15", fc: borderColor}));
+        headerNodes.push(tn(h, {fs: "fs15", fc: accentColor, bold: true}));
+      });
+      paras.push(pg(headerNodes));
+
+      // 구분선
+      paras.push(pg([tn("─────────────────────────────────────", {fs: "fs15", fc: borderColor})]));
+
+      // 데이터 행
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        const rowNodes = [];
+        row.forEach((cell, i) => {
+          if (i > 0) rowNodes.push(tn("  ┃  ", {fs: "fs15", fc: borderColor}));
+          // 마지막 열은 accent2 색상 + bold
+          if (i === row.length - 1 && row.length > 1) {
+            rowNodes.push(tn(cell, {fs: "fs15", fc: accent2Color, bold: true}));
+          } else if (i === 0) {
+            rowNodes.push(tn(cell, {fs: "fs15", fc: "#c0c4d4", bold: true}));
+          } else {
+            rowNodes.push(tn(cell, {fs: "fs15", fc: "#c0c4d4"}));
+          }
+        });
+        paras.push(pg(rowNodes));
+      }
+
+      // 구분선
+      paras.push(pg([tn("─────────────────────────────────────", {fs: "fs15", fc: borderColor})]));
+      paras.push(spacer());
+
+      return paras;
+    }
+
+    // 다크용 텍스트 노드 추출 (재귀)
+    function extractNodes(element, inherited) {
+      inherited = inherited || {};
+      const nodes = [];
+      element.childNodes.forEach(child => {
+        if (child.nodeType === Node.TEXT_NODE) {
+          const text = child.textContent;
+          if (text && text.trim()) {
+            nodes.push(tn(text, {
+              fs: inherited.fs || "fs16",
+              fc: inherited.fc || "#c8ccd8",
+              bold: inherited.bold,
+              italic: inherited.italic,
+              underline: inherited.underline,
+              strikeThrough: inherited.strikeThrough
+            }));
+          }
+        } else if (child.nodeType === Node.ELEMENT_NODE) {
+          const tag = child.tagName.toUpperCase();
+          const childInherited = Object.assign({}, inherited);
+          const inlineStyle = parseStyleString(child.getAttribute('style'));
+
+          if (tag === 'STRONG' || tag === 'B') childInherited.bold = true;
+          if (tag === 'EM' || tag === 'I') childInherited.italic = true;
+          if (tag === 'U') childInherited.underline = true;
+          if (tag === 'S' || tag === 'DEL' || tag === 'STRIKE') childInherited.strikeThrough = true;
+
+          if (inlineStyle.color) {
+            const resolved = resolveCssVar(inlineStyle.color, cssVars);
+            const hex = colorToHex(resolved);
+            if (hex) childInherited.fc = hex;
+          }
+          if (inlineStyle.fontWeight === 'bold' || parseInt(inlineStyle.fontWeight) >= 600) childInherited.bold = true;
+          if (inlineStyle.fontSize) childInherited.fs = fontSizeToCode(inlineStyle.fontSize);
+
+          nodes.push(...extractNodes(child, childInherited));
+        }
+      });
+      return nodes;
+    }
+
+    // ── 메인 노드 처리 ──
 
     function processNode(node) {
       if (node.nodeType === Node.TEXT_NODE) {
         const text = node.textContent.trim();
         if (text) {
-          currentBlock.push(makeParagraph([createDarkTextNode(text, {fontColor: '#c8ccd8'})]));
+          allParagraphs.push(pg([tn(text, {fc: "#c8ccd8"})]));
         }
         return;
       }
@@ -850,135 +953,143 @@
 
       const tagName = node.tagName.toUpperCase();
 
+      // STYLE, SCRIPT 등 무시
+      if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE'].includes(tagName)) return;
+
+      // TABLE → 카드형 텍스트 paragraph
       if (tagName === 'TABLE') {
-        flushBlock();
-        const rows = parseTable(node);
-        if (rows.length > 0) {
-          const tableComp = createDarkTableComponent(rows, cssVars);
-          if (tableComp) components.push(tableComp);
-        }
+        const paras = tableToCardParagraphs(node);
+        allParagraphs.push(...paras);
         return;
       }
 
+      // HR
       if (tagName === 'HR') {
-        currentBlock.push(makeParagraph([createDarkTextNode('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', {fontSize: 'fs15', fontColor: cssVars['--border'] || '#252b3b'})]));
+        allParagraphs.push(spacer());
+        allParagraphs.push(hrLine());
+        allParagraphs.push(spacer());
         return;
       }
 
+      // 제목
       if (/^H[1-6]$/.test(tagName)) {
-        currentBlock.push(makeSpacer());
+        allParagraphs.push(spacer());
         const fs = headingToFontSize(tagName);
-        const titleColor = tagName === 'H4' ? accent2Color : accentColor;
-        const textNodes = extractDarkTextNodes(node, {fontSize: fs, bold: true, fontColor: titleColor}, cssVars);
-        if (textNodes.length > 0) {
-          currentBlock.push(makeParagraph(textNodes));
+        const titleColor = (tagName === 'H4' || tagName === 'H5' || tagName === 'H6') ? accent2Color : accentColor;
+        const nodes = extractNodes(node, {fs: fs, bold: true, fc: titleColor});
+        if (nodes.length > 0) {
+          allParagraphs.push(pg(nodes));
         }
-        currentBlock.push(makeSpacer());
+        allParagraphs.push(spacer());
         return;
       }
 
+      // BLOCKQUOTE → 경고/인용
       if (tagName === 'BLOCKQUOTE') {
-        flushBlock();
         const text = node.textContent.trim();
         const cls = node.getAttribute('class') || '';
         if (cls.includes('warn') || text.includes('⚠')) {
-          components.push(createDarkWarnBox(text, cssVars));
+          allParagraphs.push(warnParagraph(text, warnColor));
         } else {
-          components.push(createDarkWarnBox(text, {...cssVars, '--warn': accentColor}));
+          allParagraphs.push(warnParagraph(text, accentColor));
         }
         return;
       }
 
-      // === P ===
+      // P
       if (tagName === 'P') {
+        // 링크 체크 — OG 링크는 megaCell 밖에 못 놓으니 텍스트로 처리
         const links = node.querySelectorAll('a[href]');
         if (links.length > 0) {
           links.forEach(link => {
             const href = link.getAttribute('href');
+            const linkText = link.textContent.trim();
             if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
-              flushBlock();
-              components.push(createOgLinkComponent(href, link.textContent.trim()));
+              allParagraphs.push(pg([
+                tn("🔗 ", {fs: "fs15", fc: accentColor}),
+                tn(linkText || href, {fs: "fs15", fc: accentColor, underline: true})
+              ]));
             }
           });
           return;
         }
-        const textNodes = extractDarkTextNodes(node, {fontColor: '#c8ccd8'}, cssVars);
+        const textNodes = extractNodes(node, {fc: "#c8ccd8"});
         if (textNodes.length > 0) {
-          currentBlock.push(makeParagraph(textNodes));
+          allParagraphs.push(pg(textNodes));
         }
         return;
       }
 
-      // === DIV ===
+      // DIV
       if (tagName === 'DIV') {
-        // div 안에 블록 요소가 있으면 자식만 순회 (div 자체는 무시)
-        const hasBlock = node.querySelector('table, h1, h2, h3, h4, h5, h6, hr, ul, ol, blockquote, div, p');
-        if (hasBlock) {
+        const cls = node.getAttribute('class') || '';
+
+        // wrap 등 컨테이너는 자식만 순회
+        if (cls.includes('wrap') || node.querySelector('table, h1, h2, h3, h4, h5, h6, hr, ul, ol, blockquote, div, p')) {
           Array.from(node.childNodes).forEach(processNode);
           return;
         }
 
-        // 링크 체크
-        const links = node.querySelectorAll('a[href]');
-        if (links.length > 0) {
-          links.forEach(link => {
-            const href = link.getAttribute('href');
-            if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
-              flushBlock();
-              components.push(createOgLinkComponent(href, link.textContent.trim()));
-            }
-          });
-          return;
-        }
-
-        // quote/disclaimer 클래스 → 경고 박스
-        const cls = node.getAttribute('class') || '';
+        // quote/disclaimer → 경고
         if (cls.includes('quote') || cls.includes('disclaimer')) {
-          flushBlock();
-          const warnText = node.textContent.trim();
-          components.push(createDarkWarnBox(warnText, cssVars));
+          allParagraphs.push(warnParagraph(node.textContent.trim(), warnColor));
           return;
         }
 
-        // 일반 div → 텍스트 추출
-        const textNodes = extractDarkTextNodes(node, {fontColor: '#c8ccd8'}, cssVars);
+        // hero 클래스
+        if (cls.includes('hero')) {
+          const textNodes = extractNodes(node, {fs: "fs16", fc: textColor});
+          if (textNodes.length > 0) {
+            allParagraphs.push(pg(textNodes, "center"));
+          }
+          return;
+        }
+
+        // 일반 div
+        const textNodes = extractNodes(node, {fc: "#c8ccd8"});
         if (textNodes.length > 0) {
-          currentBlock.push(makeParagraph(textNodes));
+          allParagraphs.push(pg(textNodes));
         }
         return;
       }
 
+      // UL, OL
       if (tagName === 'UL' || tagName === 'OL') {
         const isOrdered = tagName === 'OL';
         node.querySelectorAll(':scope > li').forEach((li, index) => {
           const prefix = isOrdered ? (index + 1) + '. ' : '▸ ';
-          const textNodes = extractDarkTextNodes(li, {fontColor: '#c0c4d4'}, cssVars);
+          const textNodes = extractNodes(li, {fc: "#c0c4d4"});
           if (textNodes.length > 0) {
             textNodes[0].value = prefix + textNodes[0].value;
-            currentBlock.push(makeParagraph(textNodes));
+            allParagraphs.push(pg(textNodes));
           }
         });
         return;
       }
 
+      // A 단독
       if (tagName === 'A' && node.getAttribute('href')) {
         const href = node.getAttribute('href');
         if (href.startsWith('http://') || href.startsWith('https://')) {
-          flushBlock();
-          components.push(createOgLinkComponent(href, node.textContent.trim()));
+          allParagraphs.push(pg([
+            tn("🔗 ", {fs: "fs15", fc: accentColor}),
+            tn(node.textContent.trim() || href, {fs: "fs15", fc: accentColor, underline: true})
+          ]));
           return;
         }
       }
 
+      // 기타
       Array.from(node.childNodes).forEach(processNode);
     }
 
-    currentBlock.push(makeSpacer());
+    // ── 실행 ──
+    allParagraphs.push(spacer());
 
     Array.from(body.childNodes).forEach(node => {
       if (node.nodeType === Node.ELEMENT_NODE) {
         const tag = node.tagName.toUpperCase();
-        if (tag === 'STYLE' || tag === 'SCRIPT' || tag === 'HEAD' || tag === 'META' || tag === 'LINK' || tag === 'TITLE') return;
+        if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE'].includes(tag)) return;
         if (tag === 'DIV' && (node.className || '').includes('wrap')) {
           Array.from(node.childNodes).forEach(processNode);
           return;
@@ -987,10 +1098,36 @@
       processNode(node);
     });
 
-    currentBlock.push(makeSpacer());
-    flushBlock();
+    allParagraphs.push(spacer());
 
-    return components;
+    // ── 모든 paragraph를 하나의 megaCell(1열 테이블)로 감싼다 ──
+    const megaCell = {
+      "@ctype": "table",
+      "id": uid(),
+      "layout": "default",
+      "align": "left",
+      "width": 100,
+      "columnCount": 1,
+      "borderStyleName": "none",
+      "borderInlineStyle": "border-style:none;border-width:0px;border-color:rgb(210,210,210);",
+      "rows": [{
+        "@ctype": "tableRow",
+        "id": uid(),
+        "cells": [{
+          "@ctype": "tableCell",
+          "id": uid(),
+          "colSpan": 1,
+          "rowSpan": 1,
+          "width": 100,
+          "height": 43,
+          "backgroundColor": bgColor,
+          "borderInlineStyle": "border-style:none;border-width:0px;border-color:rgb(210,210,210);",
+          "value": allParagraphs
+        }]
+      }]
+    };
+
+    return [megaCell];
   }
 
   // ========== HTML 파싱 함수 끝 ==========
