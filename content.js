@@ -141,18 +141,17 @@
   }
 
   /**
-   * 4. 폰트 크기를 SE fontSizeCode로 변환
+   * 4. 폰트 크기를 SE fontSizeCode로 변환 (fs17~fs23은 테이블 셀에서 11px로 축소되므로 우회)
    */
   function fontSizeToCode(size) {
     if (!size) return 'fs16';
-    
     const px = parseInt(size);
+    if (px >= 30) return 'fs30';
     if (px >= 28) return 'fs28';
+    if (px >= 26) return 'fs26';
     if (px >= 24) return 'fs24';
-    if (px >= 20) return 'fs20';
-    if (px >= 18) return 'fs18';
     if (px >= 16) return 'fs16';
-    if (px >= 14) return 'fs14';
+    if (px >= 15) return 'fs15';
     if (px >= 13) return 'fs13';
     return 'fs11';
   }
@@ -162,10 +161,240 @@
    */
   function headingToFontSize(tagName) {
     const map = {
-      'H1': 'fs28', 'H2': 'fs24', 'H3': 'fs20',
-      'H4': 'fs18', 'H5': 'fs16', 'H6': 'fs14'
+      'H1': 'fs28', 'H2': 'fs24', 'H3': 'fs24',
+      'H4': 'fs16', 'H5': 'fs16', 'H6': 'fs15'
     };
     return map[tagName.toUpperCase()] || 'fs16';
+  }
+
+  /**
+   * 5-1. 색상 밝기 판별 (다크 테마 감지용)
+   */
+  function isColorDark(color) {
+    let hex = colorToHex(color);
+    if (!hex) return false;
+    hex = hex.replace('#', '');
+    if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+    const r = parseInt(hex.substr(0, 2), 16);
+    const g = parseInt(hex.substr(2, 2), 16);
+    const b = parseInt(hex.substr(4, 2), 16);
+    return (0.299 * r + 0.587 * g + 0.114 * b) < 60;
+  }
+
+  /**
+   * 5-2. CSS 변수 추출 (:root)
+   */
+  function extractCssVars(html) {
+    const vars = {};
+    const rootMatch = html.match(/:root\s*\{([^}]+)\}/);
+    if (rootMatch) {
+      rootMatch[1].split(';').forEach(rule => {
+        const parts = rule.split(':').map(s => s.trim());
+        if (parts.length === 2 && parts[0].startsWith('--')) {
+          vars[parts[0]] = parts[1];
+        }
+      });
+    }
+    return vars;
+  }
+
+  /**
+   * 5-3. CSS 변수를 실제 값으로 치환
+   */
+  function resolveCssVar(value, vars) {
+    if (!value) return value;
+    return value.replace(/var\(([^)]+)\)/g, (match, varName) => {
+      return vars[varName.trim()] || match;
+    });
+  }
+
+  /**
+   * 5-4. 다크 테마 감지
+   */
+  function detectDarkTheme(html) {
+    const vars = extractCssVars(html);
+    const bgVar = vars['--bg'];
+    if (bgVar && isColorDark(bgVar)) return { isDark: true, vars };
+
+    const bodyBgMatch = html.match(/body\s*\{[^}]*background\s*:\s*([^;}]+)/);
+    if (bodyBgMatch) {
+      const resolved = resolveCssVar(bodyBgMatch[1], vars);
+      if (isColorDark(resolved)) return { isDark: true, vars };
+    }
+    return { isDark: false, vars };
+  }
+
+  /**
+   * 5-5. 다크 테마 전용 텍스트 노드 추출 (재귀)
+   */
+  function extractDarkTextNodes(element, inheritedStyle, cssVars) {
+    const nodes = [];
+    element.childNodes.forEach(child => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const text = child.textContent;
+        if (text && text.trim()) {
+          nodes.push(createDarkTextNode(text, inheritedStyle));
+        }
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const tagName = child.tagName.toUpperCase();
+        const childStyle = { ...inheritedStyle };
+        const inlineStyle = parseStyleString(child.getAttribute('style'));
+
+        if (tagName === 'STRONG' || tagName === 'B') childStyle.bold = true;
+        if (tagName === 'EM' || tagName === 'I') childStyle.italic = true;
+        if (tagName === 'U') childStyle.underline = true;
+        if (tagName === 'S' || tagName === 'DEL' || tagName === 'STRIKE') childStyle.strikeThrough = true;
+
+        if (inlineStyle.color) {
+          const resolved = resolveCssVar(inlineStyle.color, cssVars);
+          childStyle.fontColor = colorToHex(resolved);
+        }
+        if (inlineStyle.fontWeight === 'bold' || parseInt(inlineStyle.fontWeight) >= 600) childStyle.bold = true;
+        if (inlineStyle.fontSize) childStyle.fontSize = fontSizeToCode(inlineStyle.fontSize);
+
+        const childNodes = extractDarkTextNodes(child, childStyle, cssVars);
+        nodes.push(...childNodes);
+      }
+    });
+    return nodes;
+  }
+
+  /**
+   * 5-6. 다크 텍스트 노드 생성 (SE 형식, fontColor 사용)
+   */
+  function createDarkTextNode(text, style) {
+    const nodeStyle = {
+      "@ctype": "nodeStyle",
+      "fontSizeCode": style.fontSize || "fs16",
+      "fontFamily": "nanumgothic"
+    };
+    if (style.bold) nodeStyle.bold = true;
+    if (style.italic) nodeStyle.italic = true;
+    if (style.underline) nodeStyle.underline = true;
+    if (style.strikeThrough) nodeStyle.strikeThrough = true;
+    if (style.fontColor) nodeStyle.fontColor = style.fontColor;
+    if (style.backgroundColor) nodeStyle.backgroundColor = style.backgroundColor;
+
+    return {
+      "@ctype": "textNode",
+      "id": generateSeUuid(),
+      "value": text,
+      "style": nodeStyle
+    };
+  }
+
+  /**
+   * 5-7. 다크 테마 테이블 컴포넌트 생성
+   */
+  function createDarkTableComponent(rows, cssVars) {
+    if (!rows || rows.length === 0) return null;
+    const columnCount = rows[0].length;
+    const colWidth = Math.floor(100 / columnCount);
+    const nB = "border-style:solid;border-width:0px 0px 1px 0px;border-color:" + (cssVars['--border'] || '#252b3b') + ";";
+    const headerBg = '#1e2436';
+    const cellBg = cssVars['--bg'] || '#0d0f14';
+    const accentColor = cssVars['--accent'] || '#4f8ef7';
+
+    return {
+      "@ctype": "table",
+      "id": generateSeUuid(),
+      "layout": "default",
+      "width": 100,
+      "columnCount": columnCount,
+      "borderStyleName": "none",
+      "borderInlineStyle": "border-style:none;border-width:0px;border-color:rgb(210,210,210);",
+      "rows": rows.map((row, rowIndex) => ({
+        "@ctype": "tableRow",
+        "id": generateSeUuid(),
+        "cells": row.map((cell, colIndex) => ({
+          "@ctype": "tableCell",
+          "id": generateSeUuid(),
+          "colSpan": 1,
+          "rowSpan": 1,
+          "width": colWidth,
+          "height": 36,
+          "backgroundColor": rowIndex === 0 ? headerBg : cellBg,
+          "borderInlineStyle": nB,
+          "value": [{
+            "@ctype": "paragraph",
+            "id": generateSeUuid(),
+            "style": { "@ctype": "paragraphStyle", "align": "left", "lineHeight": 1.6 },
+            "nodes": [{
+              "@ctype": "textNode",
+              "id": generateSeUuid(),
+              "value": cell.text || "",
+              "style": {
+                "@ctype": "nodeStyle",
+                "fontSizeCode": "fs15",
+                "fontFamily": "nanumgothic",
+                "bold": cell.style?.bold || rowIndex === 0,
+                "fontColor": rowIndex === 0 ? accentColor : '#c0c4d4'
+              }
+            }]
+          }]
+        }))
+      }))
+    };
+  }
+
+  /**
+   * 5-8. 다크 경고 박스 생성
+   */
+  function createDarkWarnBox(text, cssVars) {
+    const warnColor = cssVars['--warn'] || '#f7c948';
+    return {
+      "@ctype": "table",
+      "id": generateSeUuid(),
+      "layout": "default",
+      "align": "left",
+      "width": 100,
+      "columnCount": 1,
+      "borderStyleName": "none",
+      "borderInlineStyle": "border-style:none;border-width:0px;border-color:rgb(210,210,210);",
+      "rows": [{"@ctype": "tableRow", "id": generateSeUuid(), "cells": [{
+        "@ctype": "tableCell",
+        "id": generateSeUuid(),
+        "colSpan": 1, "rowSpan": 1, "width": 100, "height": 36,
+        "backgroundColor": "#1a1e2b",
+        "borderInlineStyle": "border-style:solid;border-width:0px 0px 0px 3px;border-color:" + warnColor + ";",
+        "value": [{
+          "@ctype": "paragraph",
+          "id": generateSeUuid(),
+          "style": {"@ctype": "paragraphStyle", "align": "left", "lineHeight": 1.6},
+          "nodes": [{
+            "@ctype": "textNode",
+            "id": generateSeUuid(),
+            "value": text,
+            "style": {"@ctype": "nodeStyle", "fontSizeCode": "fs15", "fontFamily": "nanumgothic", "fontColor": "#c8ccd8"}
+          }]
+        }]
+      }]}]
+    };
+  }
+
+  /**
+   * 5-9. 1열 다크 블록 생성
+   */
+  function createDarkBlock(paragraphs, cssVars) {
+    const bgColor = cssVars['--bg'] || '#0d0f14';
+    return {
+      "@ctype": "table",
+      "id": generateSeUuid(),
+      "layout": "default",
+      "align": "left",
+      "width": 100,
+      "columnCount": 1,
+      "borderStyleName": "none",
+      "borderInlineStyle": "border-style:none;border-width:0px;border-color:rgb(210,210,210);",
+      "rows": [{"@ctype": "tableRow", "id": generateSeUuid(), "cells": [{
+        "@ctype": "tableCell",
+        "id": generateSeUuid(),
+        "colSpan": 1, "rowSpan": 1, "width": 100, "height": 43,
+        "backgroundColor": bgColor,
+        "borderInlineStyle": "border-style:none;border-width:0px;border-color:rgb(210,210,210);",
+        "value": paragraphs
+      }]}]
+    };
   }
 
   /**
@@ -405,8 +634,15 @@
    * 14. HTML을 SE 에디터 컴포넌트 배열로 변환 (메인 함수 - 맨 마지막!)
    */
   function parseHtmlToComponents(html) {
+    // 다크 테마 감지
+    const darkInfo = detectDarkTheme(html);
+    if (darkInfo.isDark) {
+      return parseDarkThemeToComponents(html, darkInfo.vars);
+    }
+
+    // 기존 라이트 테마 처리
     const components = [];
-    
+
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
     const body = doc.body;
@@ -538,7 +774,222 @@
         components.push(createTextComponent([paragraph]));
       }
     }
-    
+
+    return components;
+  }
+
+  /**
+   * 15. 다크 테마 전용 파서
+   */
+  function parseDarkThemeToComponents(html, cssVars) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const body = doc.body;
+
+    const bgColor = cssVars['--bg'] || '#0d0f14';
+    const accentColor = cssVars['--accent'] || '#4f8ef7';
+    const accent2Color = cssVars['--accent2'] || '#7ee8a2';
+    const textColor = cssVars['--text'] || '#e8eaf0';
+    const mutedColor = cssVars['--muted'] || '#8891a8';
+
+    const components = [];
+    let currentBlock = [];
+
+    function makeSpacer() {
+      return {
+        "@ctype": "paragraph",
+        "id": generateSeUuid(),
+        "style": {"@ctype": "paragraphStyle", "align": "left", "lineHeight": 2.0},
+        "nodes": [{
+          "@ctype": "textNode",
+          "id": generateSeUuid(),
+          "value": "\u00A0",
+          "style": {"@ctype": "nodeStyle", "fontSizeCode": "fs15", "fontFamily": "nanumgothic", "fontColor": bgColor}
+        }]
+      };
+    }
+
+    function makeParagraph(nodes, align, lh) {
+      return {
+        "@ctype": "paragraph",
+        "id": generateSeUuid(),
+        "style": {"@ctype": "paragraphStyle", "align": align || "left", "lineHeight": lh || 2.0},
+        "nodes": nodes.length > 0 ? nodes : [{
+          "@ctype": "textNode",
+          "id": generateSeUuid(),
+          "value": "\u00A0",
+          "style": {"@ctype": "nodeStyle", "fontSizeCode": "fs15", "fontFamily": "nanumgothic"}
+        }]
+      };
+    }
+
+    function flushBlock() {
+      if (currentBlock.length > 0) {
+        components.push(createDarkBlock(currentBlock, cssVars));
+        currentBlock = [];
+      }
+    }
+
+    function getElementColor(el) {
+      const style = parseStyleString(el.getAttribute('style'));
+      if (style.color) {
+        return colorToHex(resolveCssVar(style.color, cssVars));
+      }
+      return null;
+    }
+
+    function processNode(node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent.trim();
+        if (text) {
+          currentBlock.push(makeParagraph([createDarkTextNode(text, {fontColor: '#c8ccd8'})]));
+        }
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+      const tagName = node.tagName.toUpperCase();
+
+      if (tagName === 'TABLE') {
+        flushBlock();
+        const rows = parseTable(node);
+        if (rows.length > 0) {
+          const tableComp = createDarkTableComponent(rows, cssVars);
+          if (tableComp) components.push(tableComp);
+        }
+        return;
+      }
+
+      if (tagName === 'HR') {
+        currentBlock.push(makeParagraph([createDarkTextNode('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', {fontSize: 'fs15', fontColor: cssVars['--border'] || '#252b3b'})]));
+        return;
+      }
+
+      if (/^H[1-6]$/.test(tagName)) {
+        currentBlock.push(makeSpacer());
+        const fs = headingToFontSize(tagName);
+        const titleColor = tagName === 'H4' ? accent2Color : accentColor;
+        const textNodes = extractDarkTextNodes(node, {fontSize: fs, bold: true, fontColor: titleColor}, cssVars);
+        if (textNodes.length > 0) {
+          currentBlock.push(makeParagraph(textNodes));
+        }
+        currentBlock.push(makeSpacer());
+        return;
+      }
+
+      if (tagName === 'BLOCKQUOTE') {
+        flushBlock();
+        const text = node.textContent.trim();
+        const cls = node.getAttribute('class') || '';
+        if (cls.includes('warn') || text.includes('⚠')) {
+          components.push(createDarkWarnBox(text, cssVars));
+        } else {
+          components.push(createDarkWarnBox(text, {...cssVars, '--warn': accentColor}));
+        }
+        return;
+      }
+
+      // === P ===
+      if (tagName === 'P') {
+        const links = node.querySelectorAll('a[href]');
+        if (links.length > 0) {
+          links.forEach(link => {
+            const href = link.getAttribute('href');
+            if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+              flushBlock();
+              components.push(createOgLinkComponent(href, link.textContent.trim()));
+            }
+          });
+          return;
+        }
+        const textNodes = extractDarkTextNodes(node, {fontColor: '#c8ccd8'}, cssVars);
+        if (textNodes.length > 0) {
+          currentBlock.push(makeParagraph(textNodes));
+        }
+        return;
+      }
+
+      // === DIV ===
+      if (tagName === 'DIV') {
+        // div 안에 블록 요소가 있으면 자식만 순회 (div 자체는 무시)
+        const hasBlock = node.querySelector('table, h1, h2, h3, h4, h5, h6, hr, ul, ol, blockquote, div, p');
+        if (hasBlock) {
+          Array.from(node.childNodes).forEach(processNode);
+          return;
+        }
+
+        // 링크 체크
+        const links = node.querySelectorAll('a[href]');
+        if (links.length > 0) {
+          links.forEach(link => {
+            const href = link.getAttribute('href');
+            if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+              flushBlock();
+              components.push(createOgLinkComponent(href, link.textContent.trim()));
+            }
+          });
+          return;
+        }
+
+        // quote/disclaimer 클래스 → 경고 박스
+        const cls = node.getAttribute('class') || '';
+        if (cls.includes('quote') || cls.includes('disclaimer')) {
+          flushBlock();
+          const warnText = node.textContent.trim();
+          components.push(createDarkWarnBox(warnText, cssVars));
+          return;
+        }
+
+        // 일반 div → 텍스트 추출
+        const textNodes = extractDarkTextNodes(node, {fontColor: '#c8ccd8'}, cssVars);
+        if (textNodes.length > 0) {
+          currentBlock.push(makeParagraph(textNodes));
+        }
+        return;
+      }
+
+      if (tagName === 'UL' || tagName === 'OL') {
+        const isOrdered = tagName === 'OL';
+        node.querySelectorAll(':scope > li').forEach((li, index) => {
+          const prefix = isOrdered ? (index + 1) + '. ' : '▸ ';
+          const textNodes = extractDarkTextNodes(li, {fontColor: '#c0c4d4'}, cssVars);
+          if (textNodes.length > 0) {
+            textNodes[0].value = prefix + textNodes[0].value;
+            currentBlock.push(makeParagraph(textNodes));
+          }
+        });
+        return;
+      }
+
+      if (tagName === 'A' && node.getAttribute('href')) {
+        const href = node.getAttribute('href');
+        if (href.startsWith('http://') || href.startsWith('https://')) {
+          flushBlock();
+          components.push(createOgLinkComponent(href, node.textContent.trim()));
+          return;
+        }
+      }
+
+      Array.from(node.childNodes).forEach(processNode);
+    }
+
+    currentBlock.push(makeSpacer());
+
+    Array.from(body.childNodes).forEach(node => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const tag = node.tagName.toUpperCase();
+        if (tag === 'STYLE' || tag === 'SCRIPT' || tag === 'HEAD' || tag === 'META' || tag === 'LINK' || tag === 'TITLE') return;
+        if (tag === 'DIV' && (node.className || '').includes('wrap')) {
+          Array.from(node.childNodes).forEach(processNode);
+          return;
+        }
+      }
+      processNode(node);
+    });
+
+    currentBlock.push(makeSpacer());
+    flushBlock();
+
     return components;
   }
 
