@@ -779,329 +779,384 @@
   }
 
   /**
-   * 15. 다크 테마 전용 파서 — 모든 콘텐츠를 단일 megaCell에 넣어 모바일 흰줄 제거
+   * 15. 다크 테마 전용 파서
+   *     - 단일 megaCell로 모바일 흰줄 제거
+   *     - 테이블 → 카드형 세로 배치 (모바일 안 깨짐)
+   *     - 인용구 → ┃ 문자 왼쪽 바
+   *     - fs15/fs16/fs24/fs28만 사용 (11px 버그 회피)
    */
   function parseDarkThemeToComponents(html, cssVars) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
     const body = doc.body;
 
-    const bgColor = cssVars['--bg'] || '#0d0f14';
-    const accentColor = cssVars['--accent'] || '#4f8ef7';
-    const accent2Color = cssVars['--accent2'] || '#7ee8a2';
-    const textColor = cssVars['--text'] || '#e8eaf0';
-    const mutedColor = cssVars['--muted'] || '#8891a8';
-    const warnColor = cssVars['--warn'] || '#f7c948';
-    const borderColor = cssVars['--border'] || '#252b3b';
-    const cardBgColor = cssVars['--card-bg'] || '#181c28';
+    // 색상 팔레트
+    const C = {
+      bg:      cssVars['--bg']      || '#0d0f14',
+      surface: cssVars['--surface'] || '#13161e',
+      card:    cssVars['--card']    || '#181c27',
+      border:  cssVars['--border']  || '#252b3b',
+      accent:  cssVars['--accent']  || '#4f8ef7',
+      accent2: cssVars['--accent2'] || '#7ee8a2',
+      warn:    cssVars['--warn']    || '#f7c948',
+      text:    cssVars['--text']    || '#e8eaf0',
+      muted:   cssVars['--muted']   || '#8891a8',
+      body:    '#c8ccd8',
+      table:   '#c0c4d4'
+    };
 
-    // 모든 paragraph를 이 배열에 모은다 (하나의 megaCell로 만들 것)
-    const allParagraphs = [];
+    // 모든 paragraph를 모으는 배열
+    const P = [];
 
-    // ── 헬퍼 함수들 ──
-
+    // ── 헬퍼 ──
     function uid() { return generateSeUuid(); }
 
     function tn(text, opts) {
       opts = opts || {};
-      const style = {
+      const s = {
         "@ctype": "nodeStyle",
         "fontSizeCode": opts.fs || "fs16",
         "fontFamily": "nanumgothic"
       };
-      if (opts.bold) style.bold = true;
-      if (opts.italic) style.italic = true;
-      if (opts.underline) style.underline = true;
-      if (opts.strikeThrough) style.strikeThrough = true;
-      if (opts.fc) style.fontColor = opts.fc;
-      if (opts.bc) style.backgroundColor = opts.bc;
-      return { "@ctype": "textNode", "id": uid(), "value": text, "style": style };
+      if (opts.b) s.bold = true;
+      if (opts.i) s.italic = true;
+      if (opts.u) s.underline = true;
+      if (opts.st) s.strikeThrough = true;
+      if (opts.fc) s.fontColor = opts.fc;
+      return { "@ctype": "textNode", "id": uid(), "value": text, "style": s };
     }
 
     function pg(nodes, align, lh) {
       return {
-        "@ctype": "paragraph",
-        "id": uid(),
+        "@ctype": "paragraph", "id": uid(),
         "style": { "@ctype": "paragraphStyle", "align": align || "left", "lineHeight": lh || 1.8 },
-        "nodes": (nodes && nodes.length > 0) ? nodes : [tn("\u00A0", {fs: "fs15", fc: bgColor})]
+        "nodes": (nodes && nodes.length > 0) ? nodes : [tn("\u00A0", { fs: "fs11", fc: C.bg })]
       };
     }
 
-    function spacer() {
-      return pg([tn("\u00A0", {fs: "fs15", fc: bgColor})]);
-    }
+    function sp(h) { return pg([tn("\u00A0", { fs: "fs11", fc: C.bg })], null, h || 0.8); }
 
-    function hrLine() {
-      return pg([tn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", {fs: "fs15", fc: borderColor})]);
-    }
+    function hrLine() { return pg([tn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", { fs: "fs11", fc: C.border })], null, 1.0); }
 
-    // 경고/인용 박스를 paragraph로 만듦 (┃ 문자 사용)
-    function warnParagraph(text, color) {
-      color = color || warnColor;
+    function warnPg(text, color) {
       return pg([
-        tn("┃ ", {fs: "fs15", fc: color, bold: true}),
-        tn(text, {fs: "fs15", fc: "#c8ccd8"})
+        tn("  ┃ ", { fs: "fs15", b: true, fc: color || C.warn }),
+        tn(text, { fs: "fs13", fc: C.body })
       ]);
     }
 
-    // 테이블을 텍스트 카드형 paragraph 배열로 변환
-    function tableToCardParagraphs(tableElement) {
-      const paras = [];
-      const rows = [];
-      tableElement.querySelectorAll('tr').forEach(tr => {
-        const cells = [];
-        tr.querySelectorAll('th, td').forEach(cell => {
-          cells.push(cell.textContent.trim());
-        });
-        if (cells.length > 0) rows.push(cells);
-      });
-
-      if (rows.length === 0) return paras;
-
-      // 헤더 행
-      const headers = rows[0];
-
-      // 헤더 행을 paragraph로
-      paras.push(spacer());
-      const headerNodes = [];
-      headers.forEach((h, i) => {
-        if (i > 0) headerNodes.push(tn("  ┃  ", {fs: "fs15", fc: borderColor}));
-        headerNodes.push(tn(h, {fs: "fs15", fc: accentColor, bold: true}));
-      });
-      paras.push(pg(headerNodes));
-
-      // 구분선
-      paras.push(pg([tn("─────────────────────────────────────", {fs: "fs15", fc: borderColor})]));
-
-      // 데이터 행
-      for (let r = 1; r < rows.length; r++) {
-        const row = rows[r];
-        const rowNodes = [];
-        row.forEach((cell, i) => {
-          if (i > 0) rowNodes.push(tn("  ┃  ", {fs: "fs15", fc: borderColor}));
-          // 마지막 열은 accent2 색상 + bold
-          if (i === row.length - 1 && row.length > 1) {
-            rowNodes.push(tn(cell, {fs: "fs15", fc: accent2Color, bold: true}));
-          } else if (i === 0) {
-            rowNodes.push(tn(cell, {fs: "fs15", fc: "#c0c4d4", bold: true}));
-          } else {
-            rowNodes.push(tn(cell, {fs: "fs15", fc: "#c0c4d4"}));
-          }
-        });
-        paras.push(pg(rowNodes));
-      }
-
-      // 구분선
-      paras.push(pg([tn("─────────────────────────────────────", {fs: "fs15", fc: borderColor})]));
-      paras.push(spacer());
-
-      return paras;
-    }
-
-    // 다크용 텍스트 노드 추출 (재귀)
-    function extractNodes(element, inherited) {
+    // ── 텍스트 노드 추출 (재귀) ──
+    function extractNodes(el, inherited) {
       inherited = inherited || {};
       const nodes = [];
-      element.childNodes.forEach(child => {
+      el.childNodes.forEach(function(child) {
         if (child.nodeType === Node.TEXT_NODE) {
-          const text = child.textContent;
-          if (text && text.trim()) {
-            nodes.push(tn(text, {
+          const t = child.textContent;
+          if (t && t.trim()) {
+            nodes.push(tn(t, {
               fs: inherited.fs || "fs16",
-              fc: inherited.fc || "#c8ccd8",
-              bold: inherited.bold,
-              italic: inherited.italic,
-              underline: inherited.underline,
-              strikeThrough: inherited.strikeThrough
+              fc: inherited.fc || C.body,
+              b: inherited.b,
+              i: inherited.i,
+              u: inherited.u,
+              st: inherited.st
             }));
           }
         } else if (child.nodeType === Node.ELEMENT_NODE) {
           const tag = child.tagName.toUpperCase();
-          const childInherited = Object.assign({}, inherited);
-          const inlineStyle = parseStyleString(child.getAttribute('style'));
+          const ci = Object.assign({}, inherited);
+          const ist = parseStyleString(child.getAttribute('style'));
 
-          if (tag === 'STRONG' || tag === 'B') childInherited.bold = true;
-          if (tag === 'EM' || tag === 'I') childInherited.italic = true;
-          if (tag === 'U') childInherited.underline = true;
-          if (tag === 'S' || tag === 'DEL' || tag === 'STRIKE') childInherited.strikeThrough = true;
+          if (tag === 'STRONG' || tag === 'B') ci.b = true;
+          if (tag === 'EM' || tag === 'I') ci.i = true;
+          if (tag === 'U') ci.u = true;
+          if (tag === 'S' || tag === 'DEL' || tag === 'STRIKE') ci.st = true;
 
-          if (inlineStyle.color) {
-            const resolved = resolveCssVar(inlineStyle.color, cssVars);
+          if (ist.color) {
+            const resolved = resolveCssVar(ist.color, cssVars);
             const hex = colorToHex(resolved);
-            if (hex) childInherited.fc = hex;
+            if (hex) ci.fc = hex;
           }
-          if (inlineStyle.fontWeight === 'bold' || parseInt(inlineStyle.fontWeight) >= 600) childInherited.bold = true;
-          if (inlineStyle.fontSize) childInherited.fs = fontSizeToCode(inlineStyle.fontSize);
+          if (ist.fontWeight === 'bold' || parseInt(ist.fontWeight) >= 600) ci.b = true;
+          if (ist.fontSize) ci.fs = fontSizeToCode(ist.fontSize);
 
-          nodes.push(...extractNodes(child, childInherited));
+          nodes.push.apply(nodes, extractNodes(child, ci));
         }
       });
       return nodes;
     }
 
-    // ── 메인 노드 처리 ──
+    // ── 테이블 → 카드형 세로 배치 ──
+    function tableToCards(tableEl) {
+      const rows = [];
+      tableEl.querySelectorAll('tr').forEach(function(tr) {
+        const cells = [];
+        tr.querySelectorAll('th, td').forEach(function(cell) {
+          cells.push(cell.textContent.trim());
+        });
+        if (cells.length > 0) rows.push(cells);
+      });
+      if (rows.length < 2) return;
 
+      const headers = rows[0];
+      const emojis = ['📊', '💰', '🛰️', '📈', '📉', '🏭', '🔬', '📡'];
+
+      for (var r = 1; r < rows.length; r++) {
+        var row = rows[r];
+        var emoji = emojis[(r - 1) % emojis.length];
+        P.push(pg([tn(emoji + ' ' + row[0], { fs: "fs15", b: true, fc: C.accent })], null, 1.4));
+        var valNodes = [];
+        for (var c = 1; c < row.length; c++) {
+          if (c > 1) valNodes.push(tn('  →  ', { fs: "fs15", fc: C.border }));
+          valNodes.push(tn(headers[c] + ' ', { fs: "fs15", fc: C.muted }));
+          if (c === row.length - 1) {
+            valNodes.push(tn(row[c], { fs: "fs15", b: true, fc: C.accent2 }));
+          } else {
+            valNodes.push(tn(row[c], { fs: "fs15", fc: C.table }));
+          }
+        }
+        P.push(pg(valNodes, null, 1.6));
+        P.push(sp(0.6));
+      }
+    }
+
+    // ── 타임라인 처리 ──
+    function timelineToCards(divEl) {
+      divEl.querySelectorAll('.tl-item').forEach(function(item) {
+        var dateEl = item.querySelector('.tl-date');
+        var descEl = item.querySelector('.tl-desc');
+        if (dateEl && descEl) {
+          var descNodes = extractNodes(descEl, { fs: "fs15", fc: C.table });
+          var allNodes = [tn(dateEl.textContent.trim() + '  ', { fs: "fs15", b: true, fc: C.accent })];
+          allNodes.push.apply(allNodes, descNodes);
+          P.push(pg(allNodes, null, 1.6));
+        }
+      });
+    }
+
+    // ── 투자카드 처리 ──
+    function invGroupToParas(divEl) {
+      var titleEl = divEl.querySelector('.inv-group-title');
+      if (titleEl) {
+        P.push(sp(0.4));
+        P.push(pg([tn(titleEl.textContent.trim(), { fs: "fs15", b: true, fc: C.accent })], null, 1.4));
+      }
+      divEl.querySelectorAll('.inv-item').forEach(function(item) {
+        var spanEl = item.querySelector('span');
+        if (spanEl) {
+          var label = spanEl.textContent.trim();
+          var rest = item.textContent.trim().replace(label, '').trim();
+          P.push(pg([
+            tn(label, { fs: "fs15", b: true, fc: C.text }),
+            tn(' ' + rest, { fs: "fs15", fc: C.table })
+          ]));
+        } else {
+          P.push(pg([tn(item.textContent.trim(), { fs: "fs15", fc: C.table })]));
+        }
+      });
+      P.push(sp(0.4));
+    }
+
+    // ── 메인 노드 처리 ──
     function processNode(node) {
       if (node.nodeType === Node.TEXT_NODE) {
-        const text = node.textContent.trim();
-        if (text) {
-          allParagraphs.push(pg([tn(text, {fc: "#c8ccd8"})]));
-        }
+        var t = node.textContent.trim();
+        if (t) P.push(pg([tn(t, { fc: C.body })]));
         return;
       }
       if (node.nodeType !== Node.ELEMENT_NODE) return;
 
-      const tagName = node.tagName.toUpperCase();
+      var tag = node.tagName.toUpperCase();
 
-      // STYLE, SCRIPT 등 무시
-      if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE'].includes(tagName)) return;
+      if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE'].indexOf(tag) >= 0) return;
 
-      // TABLE → 카드형 텍스트 paragraph
-      if (tagName === 'TABLE') {
-        const paras = tableToCardParagraphs(node);
-        allParagraphs.push(...paras);
+      if (tag === 'TABLE') {
+        P.push(sp(1.0));
+        tableToCards(node);
+        P.push(sp(0.4));
         return;
       }
 
-      // HR
-      if (tagName === 'HR') {
-        allParagraphs.push(spacer());
-        allParagraphs.push(hrLine());
-        allParagraphs.push(spacer());
+      if (tag === 'HR') {
+        P.push(sp(1.2));
+        P.push(hrLine());
+        P.push(sp(1.2));
         return;
       }
 
-      // 제목
-      if (/^H[1-6]$/.test(tagName)) {
-        allParagraphs.push(spacer());
-        const fs = headingToFontSize(tagName);
-        const titleColor = (tagName === 'H4' || tagName === 'H5' || tagName === 'H6') ? accent2Color : accentColor;
-        const nodes = extractNodes(node, {fs: fs, bold: true, fc: titleColor});
-        if (nodes.length > 0) {
-          allParagraphs.push(pg(nodes));
-        }
-        allParagraphs.push(spacer());
+      if (/^H[1-6]$/.test(tag)) {
+        P.push(sp(1.0));
+        var fsMap = { 'H1': 'fs28', 'H2': 'fs24', 'H3': 'fs16', 'H4': 'fs15', 'H5': 'fs15', 'H6': 'fs15' };
+        var fs = fsMap[tag] || 'fs16';
+        var fc = (tag === 'H4' || tag === 'H5' || tag === 'H6') ? C.accent2 : C.accent;
+        var hNodes = extractNodes(node, { fs: fs, b: true, fc: fc });
+        if (hNodes.length > 0) P.push(pg(hNodes, null, 1.4));
+        P.push(sp(0.6));
         return;
       }
 
-      // BLOCKQUOTE → 경고/인용
-      if (tagName === 'BLOCKQUOTE') {
-        const text = node.textContent.trim();
-        const cls = node.getAttribute('class') || '';
-        if (cls.includes('warn') || text.includes('⚠')) {
-          allParagraphs.push(warnParagraph(text, warnColor));
-        } else {
-          allParagraphs.push(warnParagraph(text, accentColor));
-        }
+      if (tag === 'BLOCKQUOTE') {
+        var txt = node.textContent.trim();
+        var cls = node.getAttribute('class') || '';
+        var bColor = C.warn;
+        if (cls.indexOf('info') >= 0) bColor = C.accent;
+        if (cls.indexOf('success') >= 0) bColor = C.accent2;
+        P.push(warnPg(txt, bColor));
+        P.push(sp(0.6));
         return;
       }
 
-      // P
-      if (tagName === 'P') {
-        // 링크 체크 — OG 링크는 megaCell 밖에 못 놓으니 텍스트로 처리
-        const links = node.querySelectorAll('a[href]');
-        if (links.length > 0) {
-          links.forEach(link => {
-            const href = link.getAttribute('href');
-            const linkText = link.textContent.trim();
-            if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
-              allParagraphs.push(pg([
-                tn("🔗 ", {fs: "fs15", fc: accentColor}),
-                tn(linkText || href, {fs: "fs15", fc: accentColor, underline: true})
-              ]));
-            }
-          });
-          return;
-        }
-        const textNodes = extractNodes(node, {fc: "#c8ccd8"});
-        if (textNodes.length > 0) {
-          allParagraphs.push(pg(textNodes));
-        }
-        return;
-      }
+      if (tag === 'DIV') {
+        var cls = node.getAttribute('class') || '';
 
-      // DIV
-      if (tagName === 'DIV') {
-        const cls = node.getAttribute('class') || '';
-
-        // wrap 등 컨테이너는 자식만 순회
-        if (cls.includes('wrap') || node.querySelector('table, h1, h2, h3, h4, h5, h6, hr, ul, ol, blockquote, div, p')) {
+        if (cls.indexOf('wrap') >= 0) {
           Array.from(node.childNodes).forEach(processNode);
           return;
         }
 
-        // quote/disclaimer → 경고
-        if (cls.includes('quote') || cls.includes('disclaimer')) {
-          allParagraphs.push(warnParagraph(node.textContent.trim(), warnColor));
+        if (cls.indexOf('table-wrap') >= 0) {
+          var tbl = node.querySelector('table');
+          if (tbl) { P.push(sp(1.0)); tableToCards(tbl); P.push(sp(0.4)); }
           return;
         }
 
-        // hero 클래스
-        if (cls.includes('hero')) {
-          const textNodes = extractNodes(node, {fs: "fs16", fc: textColor});
-          if (textNodes.length > 0) {
-            allParagraphs.push(pg(textNodes, "center"));
-          }
+        if (cls.indexOf('hero') >= 0) {
+          P.push(sp(1.0));
+          var heroTag = node.querySelector('.hero-tag');
+          if (heroTag) P.push(pg([tn('  🚀 ' + heroTag.textContent.trim(), { fs: "fs13", b: true, fc: C.accent })]));
+          var h1 = node.querySelector('h1');
+          if (h1) { P.push(sp(0.6)); P.push(pg([tn('  ' + h1.textContent.trim(), { fs: "fs28", b: true, fc: C.text })], null, 1.4)); }
+          var h2 = node.querySelector('h2');
+          if (h2) { P.push(sp(0.4)); P.push(pg([tn('  ' + h2.textContent.trim(), { fs: "fs15", fc: C.muted })], null, 1.6)); }
+          P.push(sp(1.0));
+          P.push(hrLine());
+          P.push(sp(0.6));
           return;
         }
 
-        // 일반 div
-        const textNodes = extractNodes(node, {fc: "#c8ccd8"});
-        if (textNodes.length > 0) {
-          allParagraphs.push(pg(textNodes));
+        if (cls.indexOf('disclaimer') >= 0) {
+          P.push(warnPg(node.textContent.trim(), C.muted));
+          P.push(sp(1.0));
+          return;
         }
+
+        if (cls.indexOf('quote') >= 0) {
+          var bColor2 = C.warn;
+          if (cls.indexOf('info') >= 0) bColor2 = C.accent;
+          if (cls.indexOf('success') >= 0) bColor2 = C.accent2;
+          P.push(warnPg(node.textContent.trim(), bColor2));
+          P.push(sp(0.6));
+          return;
+        }
+
+        if (cls.indexOf('inv-group') >= 0) {
+          invGroupToParas(node);
+          return;
+        }
+
+        if (cls.indexOf('timeline') >= 0) {
+          timelineToCards(node);
+          return;
+        }
+
+        if (node.tagName === 'A' || cls.indexOf('cta') >= 0) {
+          var href = node.getAttribute('href');
+          var linkText = node.textContent.trim().split('\n')[0].trim();
+          P.push(sp(0.8));
+          P.push(pg([
+            tn('🔗 ', { fs: "fs15", fc: C.accent }),
+            tn(linkText, { fs: "fs15", b: true, fc: C.accent, u: true })
+          ]));
+          P.push(sp(0.8));
+          return;
+        }
+
+        if (node.querySelector('table, h1, h2, h3, h4, h5, h6, hr, ul, ol, blockquote, div, p')) {
+          Array.from(node.childNodes).forEach(processNode);
+          return;
+        }
+
+        var dNodes = extractNodes(node, { fc: C.body });
+        if (dNodes.length > 0) P.push(pg(dNodes));
         return;
       }
 
-      // UL, OL
-      if (tagName === 'UL' || tagName === 'OL') {
-        const isOrdered = tagName === 'OL';
-        node.querySelectorAll(':scope > li').forEach((li, index) => {
-          const prefix = isOrdered ? (index + 1) + '. ' : '▸ ';
-          const textNodes = extractNodes(li, {fc: "#c0c4d4"});
-          if (textNodes.length > 0) {
-            textNodes[0].value = prefix + textNodes[0].value;
-            allParagraphs.push(pg(textNodes));
+      if (tag === 'P') {
+        var links = node.querySelectorAll('a[href]');
+        if (links.length > 0) {
+          links.forEach(function(link) {
+            var href2 = link.getAttribute('href');
+            if (href2 && (href2.indexOf('http://') === 0 || href2.indexOf('https://') === 0)) {
+              P.push(pg([
+                tn('🔗 ', { fs: "fs15", fc: C.accent }),
+                tn(link.textContent.trim() || href2, { fs: "fs15", fc: C.accent, u: true })
+              ]));
+            }
+          });
+          var pClone = node.cloneNode(true);
+          pClone.querySelectorAll('a').forEach(function(a) { a.remove(); });
+          var remainText = pClone.textContent.trim();
+          if (remainText) {
+            var rNodes = extractNodes(pClone, { fc: C.body });
+            if (rNodes.length > 0) P.push(pg(rNodes));
+          }
+          return;
+        }
+        var pNodes = extractNodes(node, { fc: C.body });
+        if (pNodes.length > 0) P.push(pg(pNodes));
+        return;
+      }
+
+      if (tag === 'UL' || tag === 'OL') {
+        var isOrd = tag === 'OL';
+        var idx = 0;
+        node.querySelectorAll(':scope > li').forEach(function(li) {
+          var prefix = isOrd ? (++idx) + '. ' : '▸ ';
+          var liNodes = extractNodes(li, { fc: C.table });
+          if (liNodes.length > 0) {
+            liNodes[0].value = prefix + liNodes[0].value;
+            P.push(pg(liNodes));
           }
         });
         return;
       }
 
-      // A 단독
-      if (tagName === 'A' && node.getAttribute('href')) {
-        const href = node.getAttribute('href');
-        if (href.startsWith('http://') || href.startsWith('https://')) {
-          allParagraphs.push(pg([
-            tn("🔗 ", {fs: "fs15", fc: accentColor}),
-            tn(node.textContent.trim() || href, {fs: "fs15", fc: accentColor, underline: true})
+      if (tag === 'A' && node.getAttribute('href')) {
+        var href3 = node.getAttribute('href');
+        if (href3.indexOf('http://') === 0 || href3.indexOf('https://') === 0) {
+          P.push(sp(0.8));
+          P.push(pg([
+            tn('🔗 ', { fs: "fs15", fc: C.accent }),
+            tn(node.textContent.trim() || href3, { fs: "fs15", b: true, fc: C.accent, u: true })
           ]));
+          P.push(sp(0.8));
           return;
         }
       }
 
-      // 기타
+      if (tag === 'DIV' || tag === 'SPAN' || tag === 'SECTION' || tag === 'ARTICLE' || tag === 'MAIN') {
+        Array.from(node.childNodes).forEach(processNode);
+        return;
+      }
+
       Array.from(node.childNodes).forEach(processNode);
     }
 
     // ── 실행 ──
-    allParagraphs.push(spacer());
+    P.push(sp(1.0));
 
-    Array.from(body.childNodes).forEach(node => {
+    Array.from(body.childNodes).forEach(function(node) {
       if (node.nodeType === Node.ELEMENT_NODE) {
-        const tag = node.tagName.toUpperCase();
-        if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE'].includes(tag)) return;
-        if (tag === 'DIV' && (node.className || '').includes('wrap')) {
-          Array.from(node.childNodes).forEach(processNode);
-          return;
-        }
+        var tag2 = node.tagName.toUpperCase();
+        if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE'].indexOf(tag2) >= 0) return;
       }
       processNode(node);
     });
 
-    allParagraphs.push(spacer());
+    P.push(sp(1.0));
 
-    // ── 모든 paragraph를 하나의 megaCell(1열 테이블)로 감싼다 ──
-    const megaCell = {
+    // ── 단일 megaCell로 감싸기 ──
+    var megaCell = {
       "@ctype": "table",
       "id": uid(),
       "layout": "default",
@@ -1120,9 +1175,9 @@
           "rowSpan": 1,
           "width": 100,
           "height": 43,
-          "backgroundColor": bgColor,
+          "backgroundColor": C.bg,
           "borderInlineStyle": "border-style:none;border-width:0px;border-color:rgb(210,210,210);",
-          "value": allParagraphs
+          "value": P
         }]
       }]
     };
