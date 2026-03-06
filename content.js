@@ -213,14 +213,31 @@
    */
   function detectDarkTheme(html) {
     const vars = extractCssVars(html);
+
+    // 1) --bg 변수 체크
     const bgVar = vars['--bg'];
     if (bgVar && isColorDark(bgVar)) return { isDark: true, vars };
 
-    const bodyBgMatch = html.match(/body\s*\{[^}]*background\s*:\s*([^;}]+)/);
+    // 2) body { background: xxx } 체크
+    const bodyBgMatch = html.match(/body\s*\{[^}]*?background\s*:\s*([^;}\s]+)/);
     if (bodyBgMatch) {
       const resolved = resolveCssVar(bodyBgMatch[1], vars);
-      if (isColorDark(resolved)) return { isDark: true, vars };
+      if (isColorDark(resolved)) {
+        if (!vars['--bg']) vars['--bg'] = resolved;
+        return { isDark: true, vars };
+      }
     }
+
+    // 3) body { background-color: xxx } 체크
+    const bodyBgcMatch = html.match(/body\s*\{[^}]*?background-color\s*:\s*([^;}\s]+)/);
+    if (bodyBgcMatch) {
+      const resolved2 = resolveCssVar(bodyBgcMatch[1], vars);
+      if (isColorDark(resolved2)) {
+        if (!vars['--bg']) vars['--bg'] = resolved2;
+        return { isDark: true, vars };
+      }
+    }
+
     return { isDark: false, vars };
   }
 
@@ -790,20 +807,53 @@
     const doc = parser.parseFromString(html, 'text/html');
     const body = doc.body;
 
-    // 색상 팔레트
+    // rgba를 단색 HEX로 변환하는 헬퍼
+    function rgbaToHex(val) {
+      if (!val) return null;
+      val = val.trim();
+      if (val.startsWith('#')) return val;
+      const m = val.match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/);
+      if (m) {
+        return '#' + [m[1], m[2], m[3]].map(function(x) { return ('0' + parseInt(x).toString(16)).slice(-2); }).join('');
+      }
+      return null;
+    }
+
+    function getColor(varName, fallback) {
+      var val = cssVars[varName];
+      if (!val) return fallback;
+      val = val.trim();
+      var hex = rgbaToHex(val);
+      if (hex) return hex;
+      var h = colorToHex(val);
+      if (h) return h;
+      return fallback;
+    }
+
     const C = {
-      bg:      cssVars['--bg']      || '#0d0f14',
-      surface: cssVars['--surface'] || '#13161e',
-      card:    cssVars['--card']    || '#181c27',
-      border:  cssVars['--border']  || '#252b3b',
-      accent:  cssVars['--accent']  || '#4f8ef7',
-      accent2: cssVars['--accent2'] || '#7ee8a2',
-      warn:    cssVars['--warn']    || '#f7c948',
-      text:    cssVars['--text']    || '#e8eaf0',
-      muted:   cssVars['--muted']   || '#8891a8',
+      bg:      getColor('--bg',      '#0d0f14'),
+      surface: getColor('--surface', '#13161e'),
+      card:    getColor('--card',    '#181c27'),
+      border:  getColor('--border',  '#252b3b'),
+      accent:  getColor('--accent',  '#4f8ef7'),
+      accent2: getColor('--accent2', '#7ee8a2'),
+      warn:    getColor('--warn',    '#f7c948'),
+      text:    getColor('--text',    '#e8eaf0'),
+      muted:   getColor('--muted',   '#8891a8'),
       body:    '#c8ccd8',
       table:   '#c0c4d4'
     };
+
+    // border가 너무 밝으면 어두운 fallback
+    if (C.border) {
+      var bHex = C.border.replace('#', '');
+      if (bHex.length === 6) {
+        var bR = parseInt(bHex.substr(0, 2), 16);
+        var bG = parseInt(bHex.substr(2, 2), 16);
+        var bB = parseInt(bHex.substr(4, 2), 16);
+        if ((0.299 * bR + 0.587 * bG + 0.114 * bB) > 200) C.border = '#333355';
+      }
+    }
 
     // 모든 paragraph를 모으는 배열
     const P = [];
