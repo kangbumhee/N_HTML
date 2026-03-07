@@ -17,6 +17,14 @@
   }
   window.__naverBlogConverterInitialized = true;
 
+  // 글쓰기 페이지가 아니거나 iframe이면 UI 미표시 (중복 UI 방지)
+  const _url = window.location.href;
+  const _isWritePage = _url.includes('PostWriteForm') || _url.includes('postwrite') || _url.includes('Redirect=Write');
+  const _isTopFrame = window === window.top;
+  if (!_url.includes('blog.naver.com') || !_isWritePage || !_isTopFrame) {
+    return;
+  }
+
   // 컬러 팔레트
   const COLORS = {
     primary: "#5B7FFF",
@@ -670,10 +678,16 @@
   // ═══════════════════════════════════════════════════════
 
   function getBlogId() {
+    // 1) blogId= 파라미터
     var m = location.href.match(/blogId=([^&]+)/);
     if (m) return m[1];
+    // 2) /blogId/postwrite 패턴
     var p = location.pathname.match(/\/([^\/]+)\//);
-    return p ? p[1] : null;
+    if (p) return p[1];
+    // 3) /blogId 패턴 (Redirect=Write 등)
+    var p2 = location.pathname.match(/\/([^\/?\s]+)/);
+    if (p2) return p2[1];
+    return null;
   }
 
   async function getSeToken(blogId) {

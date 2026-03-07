@@ -39,7 +39,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   try {
     const url = tab.url || '';
     const isNaverBlog = url.includes('blog.naver.com') &&
-      (url.includes('PostWriteForm') || url.includes('postwrite'));
+      (url.includes('PostWriteForm') || url.includes('postwrite') || url.includes('Redirect=Write'));
 
     if (!isNaverBlog) {
       await chrome.scripting.executeScript({
@@ -352,18 +352,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 action: 'scrollTo',
                 y: scrollY
               });
-              await new Promise(r => setTimeout(r, 400));
+              await new Promise(r => setTimeout(r, 1500));
 
               const dataUri = await chrome.tabs.captureVisibleTab(tab.windowId, {
                 format: 'png',
                 quality: 100
               });
 
+              // 렌더링 대기
+              await new Promise(r => setTimeout(r, 500));
+
               captures.push({
                 dataUri: dataUri,
                 scrollY: scrollY,
                 viewportHeight: viewportHeight
               });
+
+              // 캡처 간 rate limit 방지
+              await new Promise(r => setTimeout(r, 1000));
 
               scrollY += viewportHeight;
               if (captures.length > 30) break;
