@@ -654,7 +654,7 @@
     // 다크 테마 감지
     const darkInfo = detectDarkTheme(html);
     if (darkInfo.isDark) {
-      return parseDarkThemeToComponents(html, darkInfo.vars);
+      return parseUniversalToComponents(html, darkInfo.vars, 'dark', darkInfo.vars['--bg']);
     }
 
     // 기존 라이트 테마 처리
@@ -796,139 +796,164 @@
   }
 
   /**
-   * 15. 다크 테마 전용 파서
-   *     - 단일 megaCell로 모바일 흰줄 제거
-   *     - 테이블 → 카드형 세로 배치 (모바일 안 깨짐)
-   *     - 인용구 → ┃ 문자 왼쪽 바
-   *     - fs15/fs16/fs24/fs28만 사용 (11px 버그 회피)
+   * 15. 유니버설 파서 — 블로그에 들어갈 수 있는 모든 HTML 요소 처리
+   *     다크/라이트 자동 대응, 단일 megaCell, 모바일 흰줄 제거
    */
-  function parseDarkThemeToComponents(html, cssVars) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, 'text/html');
-    const body = doc.body;
+  function parseUniversalToComponents(html, cssVars, themeType, bgColor) {
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(html, 'text/html');
+    var body = doc.body;
+    var isDark = (themeType === 'dark');
 
-    // rgba를 단색 HEX로 변환하는 헬퍼
+    // ══════════════════════════════════════════════
+    //  색상 시스템
+    // ══════════════════════════════════════════════
     function rgbaToHex(val) {
       if (!val) return null;
       val = val.trim();
       if (val.startsWith('#')) return val;
-      const m = val.match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/);
-      if (m) {
-        return '#' + [m[1], m[2], m[3]].map(function(x) { return ('0' + parseInt(x).toString(16)).slice(-2); }).join('');
-      }
+      var m = val.match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/);
+      if (m) return '#' + [m[1],m[2],m[3]].map(function(x){return('0'+parseInt(x).toString(16)).slice(-2)}).join('');
       return null;
     }
 
-    function getColor(varName, fallback) {
+    function getColor(varName, darkFB, lightFB) {
       var val = cssVars[varName];
-      if (!val) return fallback;
+      if (!val) return isDark ? darkFB : lightFB;
       val = val.trim();
-      var hex = rgbaToHex(val);
-      if (hex) return hex;
-      var h = colorToHex(val);
-      if (h) return h;
-      return fallback;
+      var hex = rgbaToHex(val) || colorToHex(val);
+      return hex || (isDark ? darkFB : lightFB);
     }
 
-    const C = {
-      bg:      getColor('--bg',      '#0d0f14'),
-      surface: getColor('--surface', '#13161e'),
-      card:    getColor('--card',    '#181c27'),
-      border:  getColor('--border',  '#252b3b'),
-      accent:  getColor('--accent',  '#4f8ef7'),
-      accent2: getColor('--accent2', '#7ee8a2'),
-      warn:    getColor('--warn',    '#f7c948'),
-      text:    getColor('--text',    '#e8eaf0'),
-      muted:   getColor('--muted',   '#8891a8'),
-      body:    '#c8ccd8',
-      table:   '#c0c4d4'
+    function brightness(hex) {
+      if (!hex) return 128;
+      hex = hex.replace('#','');
+      if (hex.length===3) hex=hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+      return 0.299*parseInt(hex.substr(0,2),16)+0.587*parseInt(hex.substr(2,2),16)+0.114*parseInt(hex.substr(4,2),16);
+    }
+
+    if (bgColor && typeof bgColor === 'string') {
+      var _res = resolveCssVar(bgColor, cssVars);
+      var _hex = rgbaToHex(_res) || colorToHex(_res);
+      if (_hex) bgColor = _hex;
+    }
+
+    var C = {
+      bg:      bgColor || (isDark ? '#0d0f14' : '#FFFFFF'),
+      accent:  getColor('--accent',  '#4f8ef7', '#6d28d9'),
+      accent2: getColor('--accent2', '#7ee8a2', '#059669'),
+      warn:    getColor('--warn',    '#f7c948', '#d97706'),
+      text:    getColor('--text',    '#e8eaf0', '#1a1a2e'),
+      muted:   getColor('--muted',   '#8891a8', '#6b7294'),
+      border:  getColor('--border',  '#252b3b', '#e2e5ef'),
+      pink:    getColor('--pink',    '#c084fc', '#db2777'),
+      cyan:    getColor('--cyan',    '#67e8f9', '#0891b2'),
+      code:    isDark ? '#1e2436' : '#f3f4f8',
+      codeTx:  isDark ? '#e8eaf0' : '#1a1a2e',
+      imgBdr:  isDark ? '#333355' : '#d0d0e0'
     };
+    C.body  = isDark ? '#c8ccd8' : '#3d3d56';
+    C.table = isDark ? '#c0c4d4' : '#4a4a66';
 
-    // border가 너무 밝으면 어두운 fallback
-    if (C.border) {
-      var bHex = C.border.replace('#', '');
-      if (bHex.length === 6) {
-        var bR = parseInt(bHex.substr(0, 2), 16);
-        var bG = parseInt(bHex.substr(2, 2), 16);
-        var bB = parseInt(bHex.substr(4, 2), 16);
-        if ((0.299 * bR + 0.587 * bG + 0.114 * bB) > 200) C.border = '#333355';
-      }
-    }
+    var bBr = brightness(C.border);
+    if (isDark && bBr > 200) C.border = '#333355';
+    if (!isDark && bBr < 50) C.border = '#d0d0e0';
 
-    // 모든 paragraph를 모으는 배열
-    const P = [];
+    // ══════════════════════════════════════════════
+    //  기본 빌더
+    // ══════════════════════════════════════════════
+    var P = [];
 
-    // ── 헬퍼 ──
     function uid() { return generateSeUuid(); }
 
     function tn(text, opts) {
       opts = opts || {};
-      const s = {
-        "@ctype": "nodeStyle",
-        "fontSizeCode": opts.fs || "fs16",
-        "fontFamily": "nanumgothic"
-      };
+      var s = {"@ctype":"nodeStyle","fontSizeCode":opts.fs||"fs16","fontFamily":"nanumgothic"};
       if (opts.b) s.bold = true;
       if (opts.i) s.italic = true;
       if (opts.u) s.underline = true;
       if (opts.st) s.strikeThrough = true;
       if (opts.fc) s.fontColor = opts.fc;
-      return { "@ctype": "textNode", "id": uid(), "value": text, "style": s };
+      return {"@ctype":"textNode","id":uid(),"value":text,"style":s};
     }
 
     function pg(nodes, align, lh) {
       return {
-        "@ctype": "paragraph", "id": uid(),
-        "style": { "@ctype": "paragraphStyle", "align": align || "left", "lineHeight": lh || 1.8 },
-        "nodes": (nodes && nodes.length > 0) ? nodes : [tn("\u00A0", { fs: "fs11", fc: C.bg })]
+        "@ctype":"paragraph","id":uid(),
+        "style":{"@ctype":"paragraphStyle","align":align||"left","lineHeight":lh||1.8},
+        "nodes":(nodes&&nodes.length>0)?nodes:[tn("\u00A0",{fs:"fs11",fc:C.bg})]
       };
     }
 
-    function sp(h) { return pg([tn("\u00A0", { fs: "fs11", fc: C.bg })], null, h || 0.8); }
+    function sp(h) { return pg([tn("\u00A0",{fs:"fs11",fc:C.bg})],null,h||0.8); }
 
-    function hrLine() { return pg([tn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", { fs: "fs11", fc: C.border })], null, 1.0); }
-
-    function warnPg(text, color) {
-      return pg([
-        tn("  ┃ ", { fs: "fs15", b: true, fc: color || C.warn }),
-        tn(text, { fs: "fs13", fc: C.body })
-      ]);
+    function hrLine() {
+      var ch=isDark?'━':'─'; var line='';
+      for(var i=0;i<36;i++) line+=ch;
+      return pg([tn(line,{fs:"fs11",fc:C.border})],null,1.0);
     }
 
-    // ── 텍스트 노드 추출 (재귀) ──
+    function warnPg(text, color) {
+      return pg([tn("  ┃ ",{fs:"fs15",b:true,fc:color||C.warn}),tn(text,{fs:"fs13",fc:C.body})]);
+    }
+
+    // ── 텍스트 노드 재귀 추출 (인라인 요소 전부 처리) ──
     function extractNodes(el, inherited) {
       inherited = inherited || {};
-      const nodes = [];
+      var nodes = [];
       el.childNodes.forEach(function(child) {
         if (child.nodeType === Node.TEXT_NODE) {
-          const t = child.textContent;
+          var t = child.textContent;
           if (t && t.trim()) {
             nodes.push(tn(t, {
-              fs: inherited.fs || "fs16",
-              fc: inherited.fc || C.body,
-              b: inherited.b,
-              i: inherited.i,
-              u: inherited.u,
-              st: inherited.st
+              fs:inherited.fs||"fs16", fc:inherited.fc||C.body,
+              b:inherited.b, i:inherited.i, u:inherited.u, st:inherited.st
             }));
           }
         } else if (child.nodeType === Node.ELEMENT_NODE) {
-          const tag = child.tagName.toUpperCase();
-          const ci = Object.assign({}, inherited);
-          const ist = parseStyleString(child.getAttribute('style'));
+          var tag = child.tagName.toUpperCase();
+          var ci = Object.assign({}, inherited);
+          var ist = parseStyleString(child.getAttribute('style'));
 
-          if (tag === 'STRONG' || tag === 'B') ci.b = true;
-          if (tag === 'EM' || tag === 'I') ci.i = true;
-          if (tag === 'U') ci.u = true;
-          if (tag === 'S' || tag === 'DEL' || tag === 'STRIKE') ci.st = true;
+          if (tag==='STRONG'||tag==='B') ci.b=true;
+          if (tag==='EM'||tag==='I') ci.i=true;
+          if (tag==='U'||tag==='INS') ci.u=true;
+          if (tag==='S'||tag==='DEL'||tag==='STRIKE') ci.st=true;
+          if (tag==='SUB'||tag==='SUP') { }
+          if (tag==='SMALL') { ci.fs = 'fs13'; }
+          if (tag==='MARK') { ci.b=true; }
+          if (tag==='CODE'||tag==='KBD'||tag==='VAR'||tag==='SAMP') { ci.fc=C.codeTx; ci.b=true; }
+          if (tag==='ABBR') { }
+          if (tag==='Q') {
+            nodes.push(tn('"', {fs:ci.fs,fc:C.muted}));
+            nodes.push.apply(nodes, extractNodes(child, ci));
+            nodes.push(tn('"', {fs:ci.fs,fc:C.muted}));
+            return;
+          }
+          if (tag==='CITE') { ci.i=true; ci.fc=C.muted; }
+          if (tag==='A') { ci.fc = C.accent; ci.u = true; }
+          if (tag==='BR') {
+            nodes.push(tn('\n', {fs:ci.fs||"fs16",fc:ci.fc||C.body}));
+            return;
+          }
+          if (tag==='WBR') return;
 
           if (ist.color) {
-            const resolved = resolveCssVar(ist.color, cssVars);
-            const hex = colorToHex(resolved);
+            var resolved = resolveCssVar(ist.color, cssVars);
+            var hex = rgbaToHex(resolved) || colorToHex(resolved);
             if (hex) ci.fc = hex;
           }
-          if (ist.fontWeight === 'bold' || parseInt(ist.fontWeight) >= 600) ci.b = true;
-          if (ist.fontSize) ci.fs = fontSizeToCode(ist.fontSize);
+          if (ist.fontWeight==='bold'||parseInt(ist.fontWeight)>=600) ci.b=true;
+          if (ist.fontStyle==='italic') ci.i=true;
+          if (ist.textDecoration) {
+            if (ist.textDecoration.indexOf('underline')>=0) ci.u=true;
+            if (ist.textDecoration.indexOf('line-through')>=0) ci.st=true;
+          }
+          if (ist.fontSize) ci.fs=fontSizeToCode(ist.fontSize);
+
+          if (tag==='RUBY') {
+            child.querySelectorAll('rt,rp').forEach(function(r){r.remove()});
+          }
 
           nodes.push.apply(nodes, extractNodes(child, ci));
         }
@@ -936,60 +961,64 @@
       return nodes;
     }
 
-    // ── 테이블 → 카드형 세로 배치 ──
+    // ── 테이블 → 카드형 ──
     function tableToCards(tableEl) {
-      const rows = [];
-      tableEl.querySelectorAll('tr').forEach(function(tr) {
-        const cells = [];
-        tr.querySelectorAll('th, td').forEach(function(cell) {
-          cells.push(cell.textContent.trim());
-        });
-        if (cells.length > 0) rows.push(cells);
-      });
-      if (rows.length < 2) return;
+      var caption = tableEl.querySelector('caption');
+      if (caption) {
+        P.push(pg([tn(caption.textContent.trim(),{fs:"fs15",b:true,fc:C.accent})],null,1.4));
+        P.push(sp(0.4));
+      }
 
-      const headers = rows[0];
-      const emojis = ['📊', '💰', '🛰️', '📈', '📉', '🏭', '🔬', '📡'];
+      var rows=[];
+      tableEl.querySelectorAll('tr').forEach(function(tr) {
+        var cells=[];
+        tr.querySelectorAll('th,td').forEach(function(cell){cells.push(cell.textContent.trim())});
+        if(cells.length>0) rows.push(cells);
+      });
+
+      if(rows.length===0) return;
+      if(rows.length===1) {
+        P.push(pg([tn(rows[0].join('  ┃  '),{fs:"fs15",fc:C.table})]));
+        return;
+      }
+
+      var headers=rows[0];
+      var emojis=['📊','💰','🛰️','📈','📉','🏭','🔬','📡','📋','🔢','💼','🎯'];
 
       for (var r = 1; r < rows.length; r++) {
         var row = rows[r];
         var emoji = emojis[(r - 1) % emojis.length];
         P.push(pg([tn(emoji + ' ' + row[0], { fs: "fs15", b: true, fc: C.accent })], null, 1.4));
-        var valNodes = [];
+        var vn = [];
         for (var c = 1; c < row.length; c++) {
-          if (c > 1) valNodes.push(tn('  →  ', { fs: "fs15", fc: C.border }));
-          valNodes.push(tn(headers[c] + ' ', { fs: "fs15", fc: C.muted }));
-          if (c === row.length - 1) {
-            valNodes.push(tn(row[c], { fs: "fs15", b: true, fc: C.accent2 }));
-          } else {
-            valNodes.push(tn(row[c], { fs: "fs15", fc: C.table }));
-          }
+          if (c > 1) vn.push(tn('  →  ', { fs: "fs15", fc: C.border }));
+          vn.push(tn(headers[c] + ' ', { fs: "fs15", fc: C.muted }));
+          if (c === row.length - 1) vn.push(tn(row[c], { fs: "fs15", b: true, fc: C.accent2 }));
+          else vn.push(tn(row[c], { fs: "fs15", fc: C.table }));
         }
-        P.push(pg(valNodes, null, 1.6));
+        P.push(pg(vn, null, 1.6));
         P.push(sp(0.6));
       }
     }
 
-    // ── 타임라인 처리 ──
     function timelineToCards(divEl) {
       divEl.querySelectorAll('.tl-item').forEach(function(item) {
         var dateEl = item.querySelector('.tl-date');
         var descEl = item.querySelector('.tl-desc');
         if (dateEl && descEl) {
-          var descNodes = extractNodes(descEl, { fs: "fs15", fc: C.table });
-          var allNodes = [tn(dateEl.textContent.trim() + '  ', { fs: "fs15", b: true, fc: C.accent })];
-          allNodes.push.apply(allNodes, descNodes);
-          P.push(pg(allNodes, null, 1.6));
+          var dn = extractNodes(descEl, { fs: "fs15", fc: C.table });
+          var an = [tn(dateEl.textContent.trim() + '  ', { fs: "fs15", b: true, fc: C.cyan || C.accent })];
+          an.push.apply(an, dn);
+          P.push(pg(an, null, 1.6));
         }
       });
     }
 
-    // ── 투자카드 처리 ──
     function invGroupToParas(divEl) {
       var titleEl = divEl.querySelector('.inv-group-title');
       if (titleEl) {
         P.push(sp(0.4));
-        P.push(pg([tn(titleEl.textContent.trim(), { fs: "fs15", b: true, fc: C.accent })], null, 1.4));
+        P.push(pg([tn(titleEl.textContent.trim(), { fs: "fs15", b: true, fc: C.pink || C.accent })], null, 1.4));
       }
       divEl.querySelectorAll('.inv-item').forEach(function(item) {
         var spanEl = item.querySelector('span');
@@ -1017,8 +1046,10 @@
       if (node.nodeType !== Node.ELEMENT_NODE) return;
 
       var tag = node.tagName.toUpperCase();
+      var cls = node.getAttribute('class') || '';
 
-      if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE'].indexOf(tag) >= 0) return;
+      if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE', 'NOSCRIPT', 'TEMPLATE'].indexOf(tag) >= 0) return;
+      if (cls.indexOf('orb') >= 0) return;
 
       if (tag === 'TABLE') {
         P.push(sp(1.0));
@@ -1038,7 +1069,10 @@
         P.push(sp(1.0));
         var fsMap = { 'H1': 'fs28', 'H2': 'fs24', 'H3': 'fs16', 'H4': 'fs15', 'H5': 'fs15', 'H6': 'fs15' };
         var fs = fsMap[tag] || 'fs16';
-        var fc = (tag === 'H4' || tag === 'H5' || tag === 'H6') ? C.accent2 : C.accent;
+        var fc;
+        if (tag === 'H1') fc = C.text;
+        else if (tag === 'H2' || tag === 'H3') fc = C.accent;
+        else fc = C.accent2;
         var hNodes = extractNodes(node, { fs: fs, b: true, fc: fc });
         if (hNodes.length > 0) P.push(pg(hNodes, null, 1.4));
         P.push(sp(0.6));
@@ -1047,87 +1081,112 @@
 
       if (tag === 'BLOCKQUOTE') {
         var txt = node.textContent.trim();
-        var cls = node.getAttribute('class') || '';
+        var qCls = node.getAttribute('class') || '';
         var bColor = C.warn;
-        if (cls.indexOf('info') >= 0) bColor = C.accent;
-        if (cls.indexOf('success') >= 0) bColor = C.accent2;
+        if (qCls.indexOf('info') >= 0) bColor = C.accent;
+        if (qCls.indexOf('success') >= 0) bColor = C.accent2;
+        if (qCls.indexOf('danger') >= 0 || qCls.indexOf('error') >= 0) bColor = isDark ? '#f87171' : '#dc2626';
         P.push(warnPg(txt, bColor));
         P.push(sp(0.6));
         return;
       }
 
-      if (tag === 'DIV') {
-        var cls = node.getAttribute('class') || '';
+      if (tag === 'PRE') {
+        P.push(sp(0.6));
+        var codeText = node.textContent;
+        var codeLines = codeText.split('\n');
+        codeLines.forEach(function(line) {
+          P.push(pg([tn(line || '\u00A0', { fs: "fs13", fc: C.codeTx, b: false })], null, 1.2));
+        });
+        P.push(sp(0.6));
+        return;
+      }
 
-        if (cls.indexOf('wrap') >= 0) {
-          Array.from(node.childNodes).forEach(processNode);
-          return;
-        }
-
-        if (cls.indexOf('table-wrap') >= 0) {
-          var tbl = node.querySelector('table');
-          if (tbl) { P.push(sp(1.0)); tableToCards(tbl); P.push(sp(0.4)); }
-          return;
-        }
-
-        if (cls.indexOf('hero') >= 0) {
-          P.push(sp(1.0));
-          var heroTag = node.querySelector('.hero-tag');
-          if (heroTag) P.push(pg([tn('  🚀 ' + heroTag.textContent.trim(), { fs: "fs13", b: true, fc: C.accent })]));
-          var h1 = node.querySelector('h1');
-          if (h1) { P.push(sp(0.6)); P.push(pg([tn('  ' + h1.textContent.trim(), { fs: "fs28", b: true, fc: C.text })], null, 1.4)); }
-          var h2 = node.querySelector('h2');
-          if (h2) { P.push(sp(0.4)); P.push(pg([tn('  ' + h2.textContent.trim(), { fs: "fs15", fc: C.muted })], null, 1.6)); }
-          P.push(sp(1.0));
-          P.push(hrLine());
-          P.push(sp(0.6));
-          return;
-        }
-
-        if (cls.indexOf('disclaimer') >= 0) {
-          P.push(warnPg(node.textContent.trim(), C.muted));
-          P.push(sp(1.0));
-          return;
-        }
-
-        if (cls.indexOf('quote') >= 0) {
-          var bColor2 = C.warn;
-          if (cls.indexOf('info') >= 0) bColor2 = C.accent;
-          if (cls.indexOf('success') >= 0) bColor2 = C.accent2;
-          P.push(warnPg(node.textContent.trim(), bColor2));
-          P.push(sp(0.6));
-          return;
-        }
-
-        if (cls.indexOf('inv-group') >= 0) {
-          invGroupToParas(node);
-          return;
-        }
-
-        if (cls.indexOf('timeline') >= 0) {
-          timelineToCards(node);
-          return;
-        }
-
-        if (node.tagName === 'A' || cls.indexOf('cta') >= 0) {
-          var href = node.getAttribute('href');
+      if (tag === 'A' && node.getAttribute('href')) {
+        var href = node.getAttribute('href');
+        if (href.indexOf('http') === 0) {
           var linkText = node.textContent.trim().split('\n')[0].trim();
           P.push(sp(0.8));
-          P.push(pg([
-            tn('🔗 ', { fs: "fs15", fc: C.accent }),
-            tn(linkText, { fs: "fs15", b: true, fc: C.accent, u: true })
-          ]));
+          P.push(pg([tn('🔗 ', { fs: "fs15", fc: C.accent }), tn(linkText || href, { fs: "fs15", b: true, fc: C.accent, u: true })]));
           P.push(sp(0.8));
-          return;
         }
+        return;
+      }
 
-        if (node.querySelector('table, h1, h2, h3, h4, h5, h6, hr, ul, ol, blockquote, div, p')) {
-          Array.from(node.childNodes).forEach(processNode);
-          return;
+      if (tag === 'DL') {
+        node.querySelectorAll(':scope > dt, :scope > dd').forEach(function(item) {
+          if (item.tagName === 'DT') P.push(pg([tn(item.textContent.trim(), { fs: "fs15", b: true, fc: C.text })]));
+          else P.push(pg([tn('  ' + item.textContent.trim(), { fs: "fs15", fc: C.table })]));
+        });
+        return;
+      }
+
+      if (tag === 'FIGURE') {
+        var img = node.querySelector('img');
+        var figcap = node.querySelector('figcaption');
+        if (img) {
+          var alt = img.getAttribute('alt') || '';
+          var src = img.getAttribute('src') || '';
+          P.push(sp(0.6));
+          P.push(pg([tn('🖼️ [이미지] ' + (alt || src), { fs: "fs13", fc: C.muted, i: true })]));
         }
+        if (figcap) P.push(pg([tn(figcap.textContent.trim(), { fs: "fs13", fc: C.muted, i: true })], null, 1.4));
+        P.push(sp(0.6));
+        return;
+      }
 
-        var dNodes = extractNodes(node, { fc: C.body });
-        if (dNodes.length > 0) P.push(pg(dNodes));
+      if (tag === 'IMG') {
+        P.push(pg([tn('🖼️ [이미지] ' + (node.getAttribute('alt') || node.getAttribute('src') || ''), { fs: "fs13", fc: C.muted, i: true })]));
+        return;
+      }
+
+      if (tag === 'VIDEO') {
+        P.push(pg([tn('🎬 [동영상] ' + (node.getAttribute('src') || node.getAttribute('poster') || '영상'), { fs: "fs13", fc: C.muted, i: true })]));
+        return;
+      }
+
+      if (tag === 'AUDIO') {
+        P.push(pg([tn('🎵 [오디오]', { fs: "fs13", fc: C.muted, i: true })]));
+        return;
+      }
+
+      if (tag === 'IFRAME') {
+        var isrc = node.getAttribute('src') || '';
+        var ititle = node.getAttribute('title') || '';
+        if (isrc.indexOf('youtube') >= 0 || isrc.indexOf('youtu.be') >= 0) {
+          P.push(sp(0.6));
+          P.push(pg([tn('▶️ [유튜브] ', { fs: "fs15", fc: C.accent }), tn(ititle || isrc, { fs: "fs15", fc: C.accent, u: true })]));
+          P.push(sp(0.6));
+        } else if (isrc.indexOf('map') >= 0 || isrc.indexOf('google.com/maps') >= 0) {
+          P.push(pg([tn('🗺️ [지도] ' + (ititle || isrc), { fs: "fs13", fc: C.muted, i: true })]));
+        } else {
+          P.push(pg([tn('📎 [임베드] ' + (ititle || isrc), { fs: "fs13", fc: C.muted, i: true })]));
+        }
+        return;
+      }
+
+      if (tag === 'EMBED' || tag === 'OBJECT') {
+        var esrc = node.getAttribute('src') || node.getAttribute('data') || '';
+        P.push(pg([tn('📎 [임베드] ' + esrc, { fs: "fs13", fc: C.muted, i: true })]));
+        return;
+      }
+
+      if (tag === 'DETAILS') {
+        var summary = node.querySelector('summary');
+        if (summary) {
+          P.push(sp(0.6));
+          P.push(pg([tn('▼ ' + summary.textContent.trim(), { fs: "fs15", b: true, fc: C.accent })]));
+        }
+        Array.from(node.childNodes).forEach(function(ch) {
+          if (ch.nodeType === Node.ELEMENT_NODE && ch.tagName === 'SUMMARY') return;
+          processNode(ch);
+        });
+        P.push(sp(0.6));
+        return;
+      }
+
+      if (tag === 'ADDRESS') {
+        P.push(pg([tn(node.textContent.trim(), { fs: "fs13", fc: C.muted, i: true })]));
         return;
       }
 
@@ -1137,10 +1196,7 @@
           links.forEach(function(link) {
             var href2 = link.getAttribute('href');
             if (href2 && (href2.indexOf('http://') === 0 || href2.indexOf('https://') === 0)) {
-              P.push(pg([
-                tn('🔗 ', { fs: "fs15", fc: C.accent }),
-                tn(link.textContent.trim() || href2, { fs: "fs15", fc: C.accent, u: true })
-              ]));
+              P.push(pg([tn('🔗 ', { fs: "fs15", fc: C.accent }), tn(link.textContent.trim() || href2, { fs: "fs15", fc: C.accent, u: true })]));
             }
           });
           var pClone = node.cloneNode(true);
@@ -1157,15 +1213,142 @@
         return;
       }
 
+      if (tag === 'DIV') {
+        if (cls.indexOf('wrap') >= 0 || cls.indexOf('container') >= 0 || cls.indexOf('wrapper') >= 0 || cls.indexOf('content') >= 0) {
+          Array.from(node.childNodes).forEach(processNode);
+          return;
+        }
+        if (cls.indexOf('table-wrap') >= 0 || cls.indexOf('table-container') >= 0 || cls.indexOf('table-responsive') >= 0) {
+          var tbl = node.querySelector('table');
+          if (tbl) { P.push(sp(1.0)); tableToCards(tbl); P.push(sp(0.4)); }
+          return;
+        }
+        if (cls.indexOf('hero') >= 0 || cls.indexOf('banner') >= 0 || (cls.indexOf('header') >= 0 && cls.indexOf('header-') < 0)) {
+          P.push(sp(1.0));
+          var heroTag = node.querySelector('.hero-tag,.tag,.badge,.label');
+          if (heroTag) P.push(pg([tn('  🚀 ' + heroTag.textContent.trim(), { fs: "fs13", b: true, fc: C.pink || C.accent })]));
+          var h1 = node.querySelector('h1');
+          if (h1) { P.push(sp(0.6)); P.push(pg([tn('  ' + h1.textContent.trim(), { fs: "fs28", b: true, fc: C.text })], null, 1.4)); }
+          var h2 = node.querySelector('h2,.subtitle,.sub-title,.description');
+          if (h2) { P.push(sp(0.4)); P.push(pg([tn('  ' + h2.textContent.trim(), { fs: "fs15", fc: C.muted })], null, 1.6)); }
+          P.push(sp(1.0)); P.push(hrLine()); P.push(sp(0.6));
+          return;
+        }
+        if (cls.indexOf('disclaimer') >= 0 || cls.indexOf('notice') >= 0 || cls.indexOf('warning') >= 0) {
+          P.push(warnPg(node.textContent.trim(), C.muted));
+          P.push(sp(1.0));
+          return;
+        }
+        if (cls.indexOf('quote') >= 0 || cls.indexOf('callout') >= 0 || cls.indexOf('alert') >= 0 || cls.indexOf('info-box') >= 0 || cls.indexOf('note') >= 0) {
+          var bC = C.warn;
+          if (cls.indexOf('info') >= 0 || cls.indexOf('tip') >= 0) bC = C.accent;
+          if (cls.indexOf('success') >= 0 || cls.indexOf('positive') >= 0) bC = C.accent2;
+          if (cls.indexOf('danger') >= 0 || cls.indexOf('error') >= 0 || cls.indexOf('negative') >= 0) bC = isDark ? '#f87171' : '#dc2626';
+          P.push(warnPg(node.textContent.trim(), bC));
+          P.push(sp(0.6));
+          return;
+        }
+        if (cls.indexOf('inv-group') >= 0 || cls.indexOf('card-group') >= 0) {
+          invGroupToParas(node);
+          return;
+        }
+        if (cls.indexOf('timeline') >= 0) { timelineToCards(node); return; }
+        if (cls.indexOf('footer-note') >= 0 || cls.indexOf('footer') >= 0 || cls.indexOf('copyright') >= 0) {
+          P.push(sp(1.0));
+          P.push(pg([tn(node.textContent.trim(), { fs: "fs13", fc: C.muted })]));
+          return;
+        }
+        if (cls.indexOf('cta') >= 0 || cls.indexOf('btn-wrap') >= 0 || cls.indexOf('button-wrap') >= 0) {
+          var ctaA = node.querySelector('a') || node;
+          var ctaHref = (ctaA.getAttribute && ctaA.getAttribute('href')) || '';
+          var ctaText = node.textContent.trim().split('\n')[0].trim();
+          P.push(sp(0.8));
+          P.push(pg([tn('🔗 ', { fs: "fs15", fc: C.accent }), tn(ctaText || ctaHref, { fs: "fs15", b: true, fc: C.accent, u: true })]));
+          P.push(sp(0.8));
+          return;
+        }
+        if (cls.indexOf('code') >= 0 || cls.indexOf('highlight') >= 0 || cls.indexOf('syntax') >= 0) {
+          var pre = node.querySelector('pre');
+          if (pre) { processNode(pre); return; }
+        }
+        if (cls.indexOf('tab') >= 0 || cls.indexOf('accordion') >= 0) {
+          Array.from(node.childNodes).forEach(processNode);
+          return;
+        }
+        if (cls.indexOf('grid') >= 0 || cls.indexOf('row') >= 0 || cls.indexOf('col') >= 0 || cls.indexOf('flex') >= 0) {
+          Array.from(node.childNodes).forEach(processNode);
+          return;
+        }
+
+        if (node.querySelector('table,h1,h2,h3,h4,h5,h6,hr,ul,ol,dl,blockquote,div,p,pre,figure,details,section,article')) {
+          Array.from(node.childNodes).forEach(processNode);
+          return;
+        }
+
+        var dNodes = extractNodes(node, { fc: C.body });
+        if (dNodes.length > 0) P.push(pg(dNodes));
+        return;
+      }
+
+      if (['FORM', 'FIELDSET', 'LEGEND', 'LABEL', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'DATALIST', 'OUTPUT', 'METER', 'PROGRESS'].indexOf(tag) >= 0) {
+        if (tag === 'FIELDSET' || tag === 'FORM') { Array.from(node.childNodes).forEach(processNode); return; }
+        if (tag === 'LEGEND') { P.push(pg([tn(node.textContent.trim(), { fs: "fs15", b: true, fc: C.text })])); return; }
+        var val = node.getAttribute('placeholder') || node.getAttribute('value') || node.textContent.trim();
+        if (val) P.push(pg([tn('[' + val + ']', { fs: "fs13", fc: C.muted })]));
+        return;
+      }
+
+      if (['SECTION', 'ARTICLE', 'MAIN', 'ASIDE', 'NAV', 'HEADER', 'FOOTER', 'DIALOG', 'HGROUP', 'SEARCH'].indexOf(tag) >= 0) {
+        Array.from(node.childNodes).forEach(processNode);
+        return;
+      }
+
+      if (tag === 'SPAN') {
+        var sNodes = extractNodes(node, { fc: C.body });
+        if (sNodes.length > 0) P.push(pg(sNodes));
+        return;
+      }
+
+      if (tag === 'PICTURE') {
+        var pImg = node.querySelector('img');
+        if (pImg) processNode(pImg);
+        return;
+      }
+      if (tag === 'SOURCE') return;
+
+      if (tag === 'BR') return;
+
+      if (tag === 'RUBY') {
+        var rNodes = extractNodes(node, { fc: C.body });
+        if (rNodes.length > 0) P.push(pg(rNodes));
+        return;
+      }
+      if (tag === 'RT' || tag === 'RP') return;
+
+      if (['MAP', 'AREA', 'SVG', 'CANVAS', 'MATH'].indexOf(tag) >= 0) return;
+
       if (tag === 'UL' || tag === 'OL') {
-        var isOrd = tag === 'OL';
+        var isOrd = (tag === 'OL');
         var idx = 0;
         node.querySelectorAll(':scope > li').forEach(function(li) {
-          var prefix = isOrd ? (++idx) + '. ' : '▸ ';
-          var liNodes = extractNodes(li, { fc: C.table });
-          if (liNodes.length > 0) {
-            liNodes[0].value = prefix + liNodes[0].value;
-            P.push(pg(liNodes));
+          idx++;
+          var prefix = isOrd ? idx + '. ' : '▸ ';
+          var hasNested = li.querySelector('ul,ol');
+          if (hasNested) {
+            var directText = '';
+            li.childNodes.forEach(function(cn) {
+              if (cn.nodeType === Node.TEXT_NODE) directText += cn.textContent;
+              else if (cn.nodeType === Node.ELEMENT_NODE && cn.tagName !== 'UL' && cn.tagName !== 'OL') directText += cn.textContent;
+            });
+            directText = directText.trim();
+            if (directText) P.push(pg([tn(prefix + directText, { fs: "fs15", fc: C.table })]));
+            li.querySelectorAll(':scope > ul, :scope > ol').forEach(function(nested) { processNode(nested); });
+          } else {
+            var liNodes = extractNodes(li, { fc: C.table });
+            if (liNodes.length > 0) {
+              liNodes[0].value = prefix + liNodes[0].value;
+              P.push(pg(liNodes));
+            }
           }
         });
         return;
@@ -1184,11 +1367,6 @@
         }
       }
 
-      if (tag === 'DIV' || tag === 'SPAN' || tag === 'SECTION' || tag === 'ARTICLE' || tag === 'MAIN') {
-        Array.from(node.childNodes).forEach(processNode);
-        return;
-      }
-
       Array.from(node.childNodes).forEach(processNode);
     }
 
@@ -1198,7 +1376,7 @@
     Array.from(body.childNodes).forEach(function(node) {
       if (node.nodeType === Node.ELEMENT_NODE) {
         var tag2 = node.tagName.toUpperCase();
-        if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE'].indexOf(tag2) >= 0) return;
+        if (['STYLE', 'SCRIPT', 'HEAD', 'META', 'LINK', 'TITLE', 'NOSCRIPT', 'TEMPLATE'].indexOf(tag2) >= 0) return;
       }
       processNode(node);
     });
