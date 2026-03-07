@@ -854,14 +854,30 @@
   }
 
   async function convertHtmlToNaverComponents(html, onProgress) {
+    function log(msg) {
+      console.log(msg);
+      if (onProgress) onProgress(msg);
+    }
+
+    log('═══════════════════════════════════════');
+    log('🚀 HTML → 네이버 블로그 변환 시작');
+    log('═══════════════════════════════════════');
+
     var blogId = getBlogId();
-    if (!blogId) throw new Error('블로그 ID를 찾을 수 없습니다. 네이버 블로그 글쓰기 페이지에서 실행해주세요.');
+    if (!blogId) throw new Error('블로그 ID를 찾을 수 없습니다.');
 
-    if (onProgress) onProgress('인증 토큰 획득 중...');
+    log('🔑 인증 토큰 획득 중...');
     var seToken = await getSeToken(blogId);
-    var sessionKey = await getUploadSessionKey(seToken);
+    log('✅ SE 토큰 획득 (blogId: ' + blogId + ')');
 
-    if (onProgress) onProgress('HTML 분석 중...');
+    var sessionKey = await getUploadSessionKey(seToken);
+    log('✅ 업로드 세션키 획득');
+
+    log('📦 html2canvas 로딩...');
+    await ensureHtml2Canvas();
+    log('✅ html2canvas 준비 완료');
+
+    log('📄 HTML 분석 중...');
 
     var parser = new DOMParser();
     var doc = parser.parseFromString(html, 'text/html');
@@ -875,24 +891,76 @@
     var hasStyleTag = styleSheets.length > 0;
     var hasCSSVars = /:root\s*\{/.test(html);
 
-    if (hasStyleTag || hasCSSVars) {
-      if (onProgress) onProgress('스타일 HTML 감지 → 섹션별 분할 변환 시작...');
+    var screenshotIdx = 0;
 
-      var components = [];
-      var screenshotIdx = 0;
-      var children = Array.from(body.children);
+    async function screenshotBlock(blockHtml, fileName, bgColor) {
+      screenshotIdx++;
+      if (!fileName) fileName = 'section-' + screenshotIdx + '.png';
+      log('   📸 스크린샷 생성: ' + fileName);
 
-      async function screenshotBlock(blockHtml, fileName) {
-        screenshotIdx++;
-        var fullHtml = '<html><head><meta charset="UTF-8">' + linkPrefix + stylePrefix + '</head><body style="margin:0;padding:0;">' + blockHtml + '</body></html>';
-        var blob = await htmlToScreenshotBlob(fullHtml, 700);
-        var imgInfo = await uploadImageBlob(sessionKey, blogId, blob, fileName || ('section-' + screenshotIdx + '.png'));
-        var fullSrc = 'https://blogfiles.pstatic.net' + imgInfo.url + '?type=w1';
-        await waitForCDN(fullSrc, 8);
-        return createImageComponent(imgInfo);
+      var fullHtml = '<html><head><meta charset="UTF-8">' + linkPrefix + stylePrefix +
+        '</head><body style="margin:0;padding:0;' + (bgColor ? 'background:' + bgColor + ';' : '') + '">' +
+        blockHtml + '</body></html>';
+
+      var wrapper = document.createElement('div');
+      wrapper.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:99999;width:700px;overflow:visible;';
+
+      var bodyMatch = fullHtml.match(/<body[^>]*>([\s\S]*)<\/body>/i);
+      var styleMatch = fullHtml.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || [];
+      var linkMatch2 = fullHtml.match(/<link[^>]*>/gi) || [];
+
+      if (styleMatch.length > 0 || linkMatch2.length > 0) {
+        var sc = document.createElement('div');
+        sc.innerHTML = styleMatch.join('\n') + linkMatch2.join('\n');
+        wrapper.appendChild(sc);
+      }
+      var cd = document.createElement('div');
+      cd.innerHTML = bodyMatch ? bodyMatch[1] : blockHtml;
+      wrapper.appendChild(cd);
+      document.body.appendChild(wrapper);
+
+      await new Promise(function(r) { setTimeout(r, 1200); });
+
+      var target = cd.firstElementChild || cd;
+      if (target.offsetHeight === 0) target = cd;
+
+      var canvas = await html2canvas(target, {
+        backgroundColor: bgColor || '#0a0a0f',
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        width: 700,
+        height: Math.max(target.offsetHeight, 100)
+      });
+      document.body.removeChild(wrapper);
+
+      var blob = await new Promise(function(r) { canvas.toBlob(r, 'image/png'); });
+      if (!blob) throw new Error('toBlob 실패: ' + fileName);
+
+      log('   ✅ 캡처 완료: ' + canvas.width + '×' + canvas.height + ' (' + blob.size + 'B)');
+
+      log('   ⬆️ 업로드 중: ' + fileName);
+      var imgInfo = await uploadImageBlob(sessionKey, blogId, blob, fileName);
+      log('   ✅ 업로드 완료: ' + imgInfo.url);
+
+      var fullSrc = 'https://blogfiles.pstatic.net' + imgInfo.url + '?type=w1';
+      log('   ⏳ CDN 전파 대기...');
+      for (var ci = 0; ci < 8; ci++) {
+        await new Promise(function(r) { setTimeout(r, 1500); });
+        try {
+          var hRes = await fetch(fullSrc, { method: 'HEAD' });
+          if (hRes.status === 200) {
+            log('   ✅ CDN 확인 (' + ((ci + 1) * 1.5).toFixed(1) + '초)');
+            break;
+          }
+        } catch (e) {}
       }
 
-      function extractSeoText(element) {
+      return createImageComponent(imgInfo);
+    }
+
+    function extractSeoText(element) {
         var text = element.textContent.replace(/\s+/g, ' ').trim();
         if (!text || text.length < 5) return null;
         var tag = element.tagName ? element.tagName.toUpperCase() : '';
@@ -909,15 +977,29 @@
         if (extracted.length > 0) nodes = extracted;
         else nodes = [createTextNode(text, style)];
         return createTextComponent([createParagraph(nodes)]);
-      }
+    }
+
+    if (hasStyleTag || hasCSSVars) {
+      log('🎨 스타일 HTML 감지 → 섹션별 분할 변환');
+      log('   <style> 태그: ' + styleSheets.length + '개');
+      log('   <link> 태그: ' + linkTags.length + '개');
+      log('   CSS 변수: ' + (hasCSSVars ? '있음' : '없음'));
+
+      var components = [];
+      var children = Array.from(body.children);
+
+      log('📋 최상위 요소: ' + children.length + '개');
 
       for (var i = 0; i < children.length; i++) {
         var child = children[i];
         var tag = child.tagName ? child.tagName.toUpperCase() : '';
 
-        if (onProgress) onProgress('섹션 변환 중... (' + (i + 1) + '/' + children.length + ')');
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META' || tag === 'NOSCRIPT') {
+          log('   ⏭️ [' + (i + 1) + '/' + children.length + '] <' + tag + '> 건너뜀');
+          continue;
+        }
 
-        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META' || tag === 'NOSCRIPT') continue;
+        log('\n📌 [' + (i + 1) + '/' + children.length + '] <' + tag + (child.className ? '.' + child.className.split(' ')[0] : '') + '>');
 
         var childText = child.textContent.replace(/\s+/g, ' ').trim();
         var childStyle = child.getAttribute('style') || '';
@@ -925,25 +1007,30 @@
         var childInner = child.innerHTML || '';
 
         var isVisual = false;
-        if (/hero|stats|grid|card|highlight|banner|gradient|glass|neon|timeline/i.test(childClass)) isVisual = true;
+        if (/hero|stats|grid|card|highlight|banner|gradient|glass|neon|timeline|meta|author/i.test(childClass)) isVisual = true;
         if (/gradient|flex|grid|animation|transform|clip-path|backdrop|border-radius/i.test(childStyle)) isVisual = true;
         if (child.querySelector && (
-          child.querySelector('.hero, .stats-grid, .stat-item, .highlight-card, .tags, .scroll-indicator, .author-avatar') ||
+          child.querySelector('.hero, .stats-grid, .stat-item, .highlight-card, .tags, .scroll-indicator, .author-avatar, .avatar') ||
           child.querySelector('svg, canvas, video, progress, meter') ||
           child.querySelector('[class*="grid"], [class*="flex"], [class*="card"], [class*="stat"], [class*="hero"]')
         )) isVisual = true;
         if (/display\s*:\s*(flex|grid)/i.test(childInner) || /display\s*:\s*(flex|grid)/i.test(childStyle)) isVisual = true;
         if ((tag === 'SECTION' || tag === 'ARTICLE' || tag === 'DIV') && child.children && child.children.length > 0) {
-          var innerClasses = child.innerHTML;
-          if (/stat-|grid|hero|highlight|card|avatar|scroll-indicator|tags/i.test(innerClasses)) isVisual = true;
+          if (/stat-|grid|hero|highlight|card|avatar|scroll-indicator|tags|meta/i.test(childInner)) isVisual = true;
         }
 
         if (isVisual) {
+          log('   🖼️ 시각적 요소 → 스크린샷 변환');
           try {
-            var imgComp = await screenshotBlock(child.outerHTML, 'visual-' + screenshotIdx + '.png');
-            if (components.length === 0) imgComp.represent = true;
+            var imgComp = await screenshotBlock(child.outerHTML, 'visual-' + (i + 1) + '.png');
+            if (components.length === 0) {
+              imgComp.represent = true;
+              log('   ⭐ 대표 이미지로 지정');
+            }
             components.push(imgComp);
-          } catch (e) { console.warn('스크린샷 실패:', e.message); }
+          } catch (e) {
+            log('   ❌ 스크린샷 실패: ' + e.message);
+          }
 
           if (childText.length > 10) {
             var subElements = child.querySelectorAll ? child.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,span,div') : [];
@@ -959,31 +1046,41 @@
             if (!seoAdded && childText.length > 10) {
               components.push(createTextComponent([createParagraph([createTextNode(childText, { fontSize: 'fs16' })])]));
             }
+            log('   📝 SEO 텍스트 추가');
           }
           components.push(createHorizontalLine());
+          log('   ── 구분선 추가');
+
         } else {
+          log('   📝 텍스트 요소 → 텍스트 변환');
+
           if (tag === 'HR') {
             components.push(createHorizontalLine());
+            log('   ── 구분선');
             continue;
           }
           if (tag === 'TABLE') {
             var rows = parseTable(child);
             if (rows.length > 0) {
               var tComp = createTableComponent(rows);
-              if (tComp) components.push(tComp);
+              if (tComp) { components.push(tComp); log('   📊 테이블 (' + rows.length + '행)'); }
             }
             continue;
           }
           if (/^H[1-6]$/.test(tag)) {
             var hNodes = extractTextNodes(child, { fontSize: headingToFontSize(tag), bold: true });
-            if (hNodes.length > 0) components.push(createTextComponent([createParagraph(hNodes, getAlignment(child))]));
+            if (hNodes.length > 0) {
+              components.push(createTextComponent([createParagraph(hNodes, getAlignment(child))]));
+              log('   🔤 제목: ' + childText.substring(0, 30));
+            }
             continue;
           }
           if (tag === 'BLOCKQUOTE') {
+            log('   💬 인용문 → 스크린샷 + 텍스트');
             try {
-              var bqImg = await screenshotBlock(child.outerHTML, 'quote-' + screenshotIdx + '.png');
+              var bqImg = await screenshotBlock(child.outerHTML, 'quote-' + (i + 1) + '.png');
               components.push(bqImg);
-            } catch (e) {}
+            } catch (e) { log('   ⚠️ 인용문 스크린샷 실패'); }
             var bqNodes = extractTextNodes(child, { italic: true });
             if (bqNodes.length > 0) {
               bqNodes.unshift(createTextNode('┃ ', { bold: true, color: '#6B7280' }));
@@ -993,19 +1090,23 @@
           }
           if (tag === 'UL' || tag === 'OL') {
             var isOrd = tag === 'OL';
+            var liCount = 0;
             child.querySelectorAll(':scope > li').forEach(function(li, idx) {
               var prefix = isOrd ? (idx + 1) + '. ' : '• ';
               var liNodes = extractTextNodes(li);
               if (liNodes.length > 0) {
                 liNodes[0].value = prefix + liNodes[0].value;
                 components.push(createTextComponent([createParagraph(liNodes)]));
+                liCount++;
               }
             });
+            log('   📋 목록: ' + liCount + '개 항목');
             continue;
           }
           if (tag === 'IMG') {
             var imgSrc = child.getAttribute('src');
             if (imgSrc) {
+              log('   🖼️ 이미지 업로드: ' + imgSrc.substring(0, 50));
               try {
                 var imgRes = await fetch(imgSrc);
                 var imgBlob = await imgRes.blob();
@@ -1013,7 +1114,9 @@
                 var imgInfo = await uploadImageBlob(sessionKey, blogId, imgBlob, imgName);
                 await waitForCDN('https://blogfiles.pstatic.net' + imgInfo.url + '?type=w1', 5);
                 components.push(createImageComponent(imgInfo));
+                log('   ✅ 이미지 삽입 완료');
               } catch (e) {
+                log('   ❌ 이미지 실패: ' + e.message);
                 components.push(createTextComponent([createParagraph([createTextNode('[이미지: ' + (child.getAttribute('alt') || imgSrc) + ']')])]));
               }
             }
@@ -1030,7 +1133,8 @@
                 var fInfo = await uploadImageBlob(sessionKey, blogId, fBlob, fName);
                 await waitForCDN('https://blogfiles.pstatic.net' + fInfo.url + '?type=w1', 5);
                 components.push(createImageComponent(fInfo));
-              } catch (e) {}
+                log('   ✅ Figure 이미지 삽입');
+              } catch (e) { log('   ❌ Figure 실패: ' + e.message); }
             }
             if (figCap) {
               var capNodes = extractTextNodes(figCap, { fontSize: 'fs13', color: '#6B7280' });
@@ -1040,14 +1144,18 @@
           }
           if (tag === 'A' && child.getAttribute('href')) {
             var href = child.getAttribute('href');
-            if (href.startsWith('http')) components.push(createOgLinkComponent(href, child.textContent.trim()));
+            if (href.startsWith('http')) {
+              components.push(createOgLinkComponent(href, child.textContent.trim()));
+              log('   🔗 링크: ' + href.substring(0, 40));
+            }
             continue;
           }
           if (tag === 'SVG' || tag === 'CANVAS') {
+            log('   🎨 SVG/Canvas → 스크린샷');
             try {
-              var svgComp = await screenshotBlock(child.outerHTML, 'svg-' + screenshotIdx + '.png');
+              var svgComp = await screenshotBlock(child.outerHTML, 'svg-' + (i + 1) + '.png');
               components.push(svgComp);
-            } catch (e) {}
+            } catch (e) { log('   ❌ SVG 실패: ' + e.message); }
             continue;
           }
           if (tag === 'FOOTER') {
@@ -1055,6 +1163,7 @@
             if (footerNodes.length > 0) {
               components.push(createHorizontalLine());
               components.push(createTextComponent([createParagraph(footerNodes, 'center')]));
+              log('   📝 푸터 텍스트');
             }
             continue;
           }
@@ -1062,127 +1171,91 @@
 
           if (child.children && child.children.length > 0) {
             var subChildren = Array.from(child.children);
-            for (var j = 0; j < subChildren.length; j++) {
-              var sub = subChildren[j];
-              var subTag = sub.tagName ? sub.tagName.toUpperCase() : '';
-              var subClass = sub.className || '';
-              var subStyle = sub.getAttribute('style') || '';
-              var subInner = sub.innerHTML || '';
+            var hasVisualChild = false;
+            subChildren.forEach(function(sc) {
+              var scStyle = sc.getAttribute('style') || '';
+              var scClass = sc.className || '';
+              if (/gradient|flex|grid|animation|transform/i.test(scStyle)) hasVisualChild = true;
+              if (/hero|card|stats|highlight|grid|banner/i.test(scClass)) hasVisualChild = true;
+            });
 
-              var subIsVisual = false;
-              if (/hero|stats|grid|card|highlight|banner|tags|avatar/i.test(subClass)) subIsVisual = true;
-              if (/gradient|flex|grid|animation|transform/i.test(subStyle)) subIsVisual = true;
-              if (sub.querySelector && sub.querySelector('.stat-item, .highlight-card, .tag, .hero-content, .scroll-indicator, [class*="grid"], [class*="stat"]')) subIsVisual = true;
-              if (/display\s*:\s*(flex|grid)/i.test(subInner) || /display\s*:\s*(flex|grid)/i.test(subStyle)) subIsVisual = true;
+            if (hasVisualChild) {
+              log('   🖼️ 내부 시각 요소 발견 → 스크린샷');
+              try {
+                var subImg = await screenshotBlock(child.outerHTML, 'sub-' + (i + 1) + '.png');
+                components.push(subImg);
+              } catch (e) { log('   ❌ 내부 스크린샷 실패'); }
 
-              if (subIsVisual) {
-                try {
-                  var subImg = await screenshotBlock(sub.outerHTML, 'sub-' + screenshotIdx + '.png');
-                  if (components.length === 0 || !components.some(function(c) { return c.represent; })) subImg.represent = true;
-                  components.push(subImg);
-                } catch (e) {}
-                var subText = sub.textContent.replace(/\s+/g, ' ').trim();
-                if (subText.length > 10) {
-                  var subSubs = sub.querySelectorAll ? sub.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,span,div') : [];
-                  subSubs.forEach(function(s) {
-                    var sText = s.textContent.replace(/\s+/g, ' ').trim();
-                    if (sText.length > 10 && sText !== subText) {
-                      var sc = extractSeoText(s);
-                      if (sc) components.push(sc);
-                    }
-                  });
-                }
-                components.push(createHorizontalLine());
-              } else {
-                if (/^H[1-6]$/.test(subTag)) {
-                  var shNodes = extractTextNodes(sub, { fontSize: headingToFontSize(subTag), bold: true });
-                  if (shNodes.length > 0) components.push(createTextComponent([createParagraph(shNodes)]));
-                } else if (subTag === 'BLOCKQUOTE') {
-                  try {
-                    var sbqImg = await screenshotBlock(sub.outerHTML, 'bq-' + screenshotIdx + '.png');
-                    components.push(sbqImg);
-                  } catch (e) {}
-                  var sbqNodes = extractTextNodes(sub, { italic: true });
-                  if (sbqNodes.length > 0) {
-                    sbqNodes.unshift(createTextNode('┃ ', { bold: true, color: '#6B7280' }));
-                    components.push(createTextComponent([createParagraph(sbqNodes)]));
-                  }
-                } else if (subTag === 'UL' || subTag === 'OL') {
-                  var sIsOrd = subTag === 'OL';
-                  sub.querySelectorAll(':scope > li').forEach(function(li, idx) {
-                    var prefix = sIsOrd ? (idx + 1) + '. ' : '• ';
-                    var liNodes = extractTextNodes(li);
-                    if (liNodes.length > 0) {
-                      liNodes[0].value = prefix + liNodes[0].value;
-                      components.push(createTextComponent([createParagraph(liNodes)]));
-                    }
-                  });
-                } else if (subTag === 'HR') {
-                  components.push(createHorizontalLine());
-                } else if (subTag === 'P' || subTag === 'DIV' || subTag === 'SPAN' || subTag === 'ARTICLE' || subTag === 'SECTION' || subTag === 'HEADER' || subTag === 'MAIN' || subTag === 'ASIDE' || subTag === 'NAV') {
-                  if (sub.children && sub.children.length > 0 && sub.querySelector && sub.querySelector('[class*="grid"], [class*="stat"], [class*="card"], [class*="hero"], [class*="highlight"], [class*="tag"]')) {
-                    try {
-                      var deepImg = await screenshotBlock(sub.outerHTML, 'deep-' + screenshotIdx + '.png');
-                      components.push(deepImg);
-                    } catch (e) {}
-                    var deepText = sub.textContent.replace(/\s+/g, ' ').trim();
-                    if (deepText.length > 10) {
-                      components.push(createTextComponent([createParagraph([createTextNode(deepText, { fontSize: 'fs16' })])]));
-                    }
-                  } else {
-                    var pNodes = extractTextNodes(sub);
-                    if (pNodes.length > 0) components.push(createTextComponent([createParagraph(pNodes)]));
-                  }
-                } else if (subTag === 'FOOTER') {
-                  var ftNodes = extractTextNodes(sub, { fontSize: 'fs13', color: '#6B7280' });
-                  if (ftNodes.length > 0) {
-                    components.push(createHorizontalLine());
-                    components.push(createTextComponent([createParagraph(ftNodes, 'center')]));
-                  }
-                } else {
-                  var genNodes = extractTextNodes(sub);
-                  if (genNodes.length > 0) components.push(createTextComponent([createParagraph(genNodes)]));
-                }
+              if (childText.length > 10) {
+                components.push(createTextComponent([createParagraph([createTextNode(childText, { fontSize: 'fs16' })])]));
+                log('   📝 SEO 텍스트 추가');
+              }
+              components.push(createHorizontalLine());
+            } else {
+              var textNodes = extractTextNodes(child);
+              if (textNodes.length > 0) {
+                var align = getAlignment(child);
+                components.push(createTextComponent([createParagraph(textNodes, align)]));
+                log('   📝 텍스트: ' + childText.substring(0, 40));
               }
             }
           } else {
-            if (childText.length > 0) {
-              var leafNodes = extractTextNodes(child);
-              if (leafNodes.length > 0) {
-                components.push(createTextComponent([createParagraph(leafNodes, getAlignment(child))]));
-              }
+            var textNodes2 = extractTextNodes(child);
+            if (textNodes2.length > 0) {
+              components.push(createTextComponent([createParagraph(textNodes2, getAlignment(child))]));
+              log('   📝 텍스트: ' + childText.substring(0, 40));
             }
           }
         }
       }
 
-      if (components.length === 0) return parseHtmlToComponents(html);
-      if (onProgress) onProgress('완료!');
+      if (components.length === 0) {
+        log('⚠️ 컴포넌트 0개 → 폴백 파서 사용');
+        return parseHtmlToComponents(html);
+      }
+
+      var imgCount = components.filter(function(c) { return c['@ctype'] === 'image'; }).length;
+      var txtCount = components.filter(function(c) { return c['@ctype'] === 'text'; }).length;
+      var hrCount = components.filter(function(c) { return c['@ctype'] === 'horizontalLine'; }).length;
+
+      log('\n═══════════════════════════════════════');
+      log('✅ 변환 완료!');
+      log('   📸 이미지: ' + imgCount + '장');
+      log('   📝 텍스트: ' + txtCount + '개');
+      log('   ── 구분선: ' + hrCount + '개');
+      log('   📦 총: ' + components.length + '개 컴포넌트');
+      log('═══════════════════════════════════════');
+
       return components;
     }
 
+    log('📝 플레인 HTML → 태그별 변환');
+
     var components = [];
-    var screenshotIndex = 0;
     var children = Array.from(body.children);
+
+    log('📋 최상위 요소: ' + children.length + '개');
 
     for (var i = 0; i < children.length; i++) {
       var child = children[i];
       var tag = child.tagName.toUpperCase();
 
-      if (onProgress) onProgress('변환 중... (' + (i + 1) + '/' + children.length + ')');
+      log('[' + (i + 1) + '/' + children.length + '] <' + tag + '>');
 
       if (needsScreenshot(child)) {
-        screenshotIndex++;
+        screenshotIdx++;
+        log('   🖼️ 복잡한 요소 → 스크린샷');
         try {
           var blockHtml = child.outerHTML;
-          var styleTag = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi);
-          if (styleTag) blockHtml = styleTag.join('\n') + '\n' + blockHtml;
+          var styleTag2 = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi);
+          if (styleTag2) blockHtml = styleTag2.join('\n') + '\n' + blockHtml;
           var imgComp2 = await htmlBlockToImageComponent(
-            blockHtml, 'block-' + screenshotIndex + '.png', blogId, seToken, sessionKey
+            blockHtml, 'block-' + screenshotIdx + '.png', blogId, seToken, sessionKey
           );
           components.push(imgComp2);
+          log('   ✅ 스크린샷 삽입 완료');
         } catch (e) {
-          console.warn('스크린샷 실패, 텍스트로 대체:', e.message);
+          log('   ❌ 스크린샷 실패, 텍스트로 대체');
           var fallbackNodes = extractTextNodes(child);
           if (fallbackNodes.length > 0) {
             components.push(createTextComponent([createParagraph(fallbackNodes)]));
@@ -1194,6 +1267,7 @@
       if (tag === 'IMG') {
         var imgSrc = child.getAttribute('src');
         if (imgSrc) {
+          log('   🖼️ 이미지 업로드...');
           try {
             var imgRes = await fetch(imgSrc);
             var imgBlob = await imgRes.blob();
@@ -1202,8 +1276,9 @@
             var fullUrl = 'https://blogfiles.pstatic.net' + imgInfo2.url + '?type=w1';
             await waitForCDN(fullUrl, 5);
             components.push(createImageComponent(imgInfo2));
+            log('   ✅ 이미지 삽입 완료');
           } catch (e) {
-            console.warn('이미지 업로드 실패:', e.message);
+            log('   ❌ 이미지 실패: ' + e.message);
             var altText = child.getAttribute('alt') || imgSrc;
             components.push(createTextComponent([createParagraph([createTextNode('[이미지: ' + altText + ']')])]));
           }
@@ -1222,7 +1297,8 @@
             var figInfo = await uploadImageBlob(sessionKey, blogId, figBlob, figName);
             await waitForCDN('https://blogfiles.pstatic.net' + figInfo.url + '?type=w1', 5);
             components.push(createImageComponent(figInfo));
-          } catch (e) { console.warn('figure 이미지 실패:', e.message); }
+            log('   ✅ Figure 삽입');
+          } catch (e) { log('   ❌ Figure 실패: ' + e.message); }
         }
         if (figCaption) {
           var capNodes = extractTextNodes(figCaption, { fontSize: 'fs13', color: '#6B7280' });
@@ -1235,6 +1311,7 @@
 
       if (tag === 'HR') {
         components.push(createHorizontalLine());
+        log('   ── 구분선');
         continue;
       }
 
@@ -1242,7 +1319,7 @@
         var rows = parseTable(child);
         if (rows.length > 0) {
           var tComp = createTableComponent(rows);
-          if (tComp) components.push(tComp);
+          if (tComp) { components.push(tComp); log('   📊 테이블'); }
         }
         continue;
       }
@@ -1251,6 +1328,7 @@
         var hNodes = extractTextNodes(child, { fontSize: headingToFontSize(tag), bold: true });
         if (hNodes.length > 0) {
           components.push(createTextComponent([createParagraph(hNodes, getAlignment(child))]));
+          log('   🔤 제목: ' + child.textContent.trim().substring(0, 30));
         }
         continue;
       }
@@ -1265,6 +1343,7 @@
             components.push(createTextComponent([createParagraph(liNodes)]));
           }
         });
+        log('   📋 목록');
         continue;
       }
 
@@ -1273,6 +1352,7 @@
         if (bqNodes.length > 0) {
           bqNodes.unshift(createTextNode('┃ ', { bold: true, color: '#6B7280' }));
           components.push(createTextComponent([createParagraph(bqNodes)]));
+          log('   💬 인용문');
         }
         continue;
       }
@@ -1283,6 +1363,7 @@
           components.push(createTextComponent([
             createParagraph([createTextNode(codeText, { fontSize: 'fs15', color: '#E8EAF0' })])
           ]));
+          log('   💻 코드 블록');
         }
         continue;
       }
@@ -1291,18 +1372,20 @@
         var href = child.getAttribute('href');
         if (href.startsWith('http')) {
           components.push(createOgLinkComponent(href, child.textContent.trim()));
+          log('   🔗 링크');
         }
         continue;
       }
 
       if (tag === 'SVG' || tag === 'CANVAS') {
-        screenshotIndex++;
+        screenshotIdx++;
+        log('   🎨 SVG/Canvas 캡처...');
         try {
           var svgComp = await htmlBlockToImageComponent(
-            child.outerHTML, 'svg-' + screenshotIndex + '.png', blogId, seToken, sessionKey
+            child.outerHTML, 'svg-' + screenshotIdx + '.png', blogId, seToken, sessionKey
           );
           components.push(svgComp);
-        } catch (e) { console.warn('SVG/Canvas 캡처 실패:', e.message); }
+        } catch (e) { log('   ❌ SVG 실패'); }
         continue;
       }
 
@@ -1310,6 +1393,7 @@
         var videoSrc = child.getAttribute('src') || (child.querySelector('source') && child.querySelector('source').src) || '';
         if (videoSrc) {
           components.push(createTextComponent([createParagraph([createTextNode('🎬 동영상: ' + videoSrc)])]));
+          log('   🎬 동영상 링크');
         }
         continue;
       }
@@ -1325,6 +1409,7 @@
         if (detailNodes.length > 0) {
           components.push(createTextComponent([createParagraph(detailNodes)]));
         }
+        log('   📂 Details');
         continue;
       }
 
@@ -1335,14 +1420,27 @@
       if (textNodes.length > 0) {
         var align = getAlignment(child);
         components.push(createTextComponent([createParagraph(textNodes, align)]));
+        log('   📝 텍스트: ' + child.textContent.trim().substring(0, 40));
       }
     }
 
     if (components.length === 0) {
+      log('⚠️ 컴포넌트 0개 → 폴백 파서 사용');
       return parseHtmlToComponents(html);
     }
 
-    if (onProgress) onProgress('완료!');
+    var imgCount = components.filter(function(c) { return c['@ctype'] === 'image'; }).length;
+    var txtCount = components.filter(function(c) { return c['@ctype'] === 'text'; }).length;
+    var hrCount = components.filter(function(c) { return c['@ctype'] === 'horizontalLine'; }).length;
+
+    log('\n═══════════════════════════════════════');
+    log('✅ 변환 완료!');
+    log('   📸 이미지: ' + imgCount + '장');
+    log('   📝 텍스트: ' + txtCount + '개');
+    log('   ── 구분선: ' + hrCount + '개');
+    log('   📦 총: ' + components.length + '개 컴포넌트');
+    log('═══════════════════════════════════════');
+
     return components;
   }
 
@@ -2301,15 +2399,35 @@
   }
 
   /**
-   * 변환 진행 상태 표시
+   * 상태 표시 — 콘솔 스타일 로그 누적
    */
   function updateStatus(message) {
-    var statusEl = container ? container.querySelector('#nbc-status') : null;
-    if (statusEl) {
-      statusEl.textContent = message || '이미지+텍스트 자동 혼합 변환 지원';
-      statusEl.style.display = 'block';
+    var el = container ? container.querySelector('#nbc-status') : document.getElementById('nbc-status');
+    if (!el) return;
+
+    if (!message || message === '') {
+      el.textContent = '이미지+텍스트 자동 혼합 변환 지원';
+      return;
     }
-    if (message) console.log('[변환기]', message);
+
+    if (message.includes('변환 시작') || message.includes('인증 토큰') || message.includes('═══')) {
+      el.textContent = '';
+    }
+
+    var now = new Date();
+    var ts = ('0' + now.getHours()).slice(-2) + ':' +
+             ('0' + now.getMinutes()).slice(-2) + ':' +
+             ('0' + now.getSeconds()).slice(-2);
+
+    var line = '[' + ts + '] ' + message;
+
+    if (el.textContent && el.textContent !== '이미지+텍스트 자동 혼합 변환 지원') {
+      el.textContent += '\n' + line;
+    } else {
+      el.textContent = line;
+    }
+
+    el.scrollTop = el.scrollHeight;
   }
 
   /**
@@ -3294,7 +3412,22 @@
           <button class="nbc-btn-clear" id="nbc-clear">🗑️ 지우기</button>
           <button class="nbc-btn-convert" id="nbc-convert">📤 블로그에 삽입</button>
         </div>
-        <div id="nbc-status" style="padding:8px 12px;font-size:12px;color:#6B7280;text-align:center;min-height:20px;">이미지+텍스트 자동 혼합 변환 지원</div>
+        <div id="nbc-status" style="
+  background:#0f1117;
+  color:#a8b2c1;
+  font-family:Consolas,'Courier New',monospace;
+  font-size:11px;
+  line-height:1.6;
+  padding:10px 12px;
+  border-radius:8px;
+  margin:8px 0;
+  min-height:28px;
+  max-height:180px;
+  overflow-y:auto;
+  border:1px solid #2a2d3a;
+  white-space:pre-wrap;
+  word-break:break-all;
+">이미지+텍스트 자동 혼합 변환 지원</div>
         <div style="padding:6px 12px;font-size:11px;color:#9CA3AF;text-align:center;background:#F0F9FF;border-radius:6px;margin:4px 8px;">
           📌 HTML을 넣으면 이미지·텍스트가 자동 배치되어<br>네이버 에디터에 바로 삽입됩니다
         </div>
@@ -3970,7 +4103,7 @@
 
       var components;
       try {
-        updateStatus('변환 시작...');
+        updateStatus('🚀 변환 시작...');
         components = await convertHtmlToNaverComponents(htmlToConvert, function(msg) {
           updateStatus(msg);
         });
