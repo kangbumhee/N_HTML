@@ -665,6 +665,413 @@
     return rows;
   }
 
+  // ═══════════════════════════════════════════════════════
+  //  [확장] HTML 스크린샷 → 이미지 업로드 → SE 이미지 컴포넌트
+  // ═══════════════════════════════════════════════════════
+
+  function getBlogId() {
+    var m = location.href.match(/blogId=([^&]+)/);
+    if (m) return m[1];
+    var p = location.pathname.match(/\/([^\/]+)\//);
+    return p ? p[1] : null;
+  }
+
+  async function getSeToken(blogId) {
+    var res = await fetch(
+      'https://blog.naver.com/PostWriteFormSeOptions.naver?blogId=' + blogId + '&categoryNo=0',
+      { credentials: 'include' }
+    );
+    var data = await res.json();
+    return data.result.token;
+  }
+
+  function getUploadSessionKey(seToken) {
+    return new Promise(function(resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', 'https://platform.editor.naver.com/api/blogpc001/v1/photo-uploader/session-key');
+      xhr.setRequestHeader('Accept', 'application/json');
+      xhr.setRequestHeader('Pragma', 'no-cache');
+      xhr.setRequestHeader('Se-Authorization', seToken);
+      xhr.setRequestHeader('SE-App-Id', 'SE-' + crypto.randomUUID());
+      xhr.withCredentials = true;
+      xhr.onload = function() {
+        try {
+          var data = JSON.parse(xhr.responseText);
+          if (data.sessionKey) resolve(data.sessionKey);
+          else reject(new Error('세션키 획득 실패'));
+        } catch (e) { reject(e); }
+      };
+      xhr.onerror = function() { reject(new Error('세션키 요청 실패')); };
+      xhr.send();
+    });
+  }
+
+  async function uploadImageBlob(sessionKey, blogId, blob, fileName) {
+    var uploadUrl = 'https://blog.upphoto.naver.com/' + sessionKey +
+      '/simpleUpload/0?userId=' + blogId +
+      '&extractExif=true&extractAnimatedCnt=false&extractAnimatedInfo=true' +
+      '&autorotate=true&extractDominantColor=false&type=&customQuery=' +
+      '&denyAnimatedImage=false&skipXcamFiltering=false';
+
+    var fd = new FormData();
+    fd.append('image', blob, fileName);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', uploadUrl);
+    xhr.withCredentials = true;
+    var p = new Promise(function(resolve, reject) {
+      xhr.onload = function() {
+        if (xhr.status !== 200) { reject(new Error('업로드 실패: ' + xhr.status)); return; }
+        var resp = xhr.responseText;
+        var urlVal = resp.match(/<url>([^<]+)<\/url>/);
+        if (!urlVal) { reject(new Error('업로드 응답 파싱 실패')); return; }
+        resolve({
+          url: urlVal[1],
+          path: urlVal[1],
+          width: parseInt((resp.match(/<width>(\d+)<\/width>/) || [0, 0])[1]),
+          height: parseInt((resp.match(/<height>(\d+)<\/height>/) || [0, 0])[1]),
+          fileSize: parseInt((resp.match(/<fileSize>(\d+)<\/fileSize>/) || [0, 0])[1]),
+          fileName: (resp.match(/<fileName>([^<]+)<\/fileName>/) || [0, fileName])[1]
+        });
+      };
+      xhr.onerror = function() { reject(new Error('업로드 요청 실패')); };
+    });
+    xhr.send(fd);
+    return p;
+  }
+
+  async function ensureHtml2Canvas() {
+    if (typeof html2canvas !== 'undefined') return;
+    return new Promise(function(resolve, reject) {
+      var s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+
+  async function htmlToScreenshotBlob(htmlString, width) {
+    width = width || 700;
+    await ensureHtml2Canvas();
+
+    var wrapper = document.createElement('div');
+    wrapper.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:99999;width:' + width + 'px;';
+    wrapper.innerHTML = htmlString;
+    document.body.appendChild(wrapper);
+
+    await new Promise(function(r) { setTimeout(r, 500); });
+
+    var target = wrapper.firstElementChild || wrapper;
+    var canvas = await html2canvas(target, {
+      backgroundColor: null,
+      scale: 2,
+      useCORS: true,
+      logging: false,
+      width: width
+    });
+
+    document.body.removeChild(wrapper);
+
+    return new Promise(function(resolve) {
+      canvas.toBlob(resolve, 'image/png');
+    });
+  }
+
+  async function waitForCDN(url, maxAttempts) {
+    maxAttempts = maxAttempts || 10;
+    for (var i = 0; i < maxAttempts; i++) {
+      await new Promise(function(r) { setTimeout(r, 2000); });
+      try {
+        var res = await fetch(url, { method: 'HEAD' });
+        if (res.status === 200) return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+
+  function createImageComponent(imgInfo) {
+    var domain = 'https://blogfiles.pstatic.net';
+    var fullSrc = domain + imgInfo.url + '?type=w1';
+    var displayW = Math.min(imgInfo.width, 700);
+    var displayH = Math.round(imgInfo.height * displayW / imgInfo.width);
+
+    return {
+      "id": generateSeUuid(),
+      "layout": "default",
+      "src": fullSrc,
+      "internalResource": true,
+      "represent": false,
+      "path": imgInfo.path,
+      "domain": domain,
+      "fileSize": imgInfo.fileSize,
+      "width": displayW,
+      "widthPercentage": 0,
+      "height": displayH,
+      "originalWidth": imgInfo.width,
+      "originalHeight": imgInfo.height,
+      "fileName": imgInfo.fileName,
+      "caption": null,
+      "format": "normal",
+      "displayFormat": "normal",
+      "imageLoaded": true,
+      "contentMode": "fit",
+      "origin": { "srcFrom": "local", "@ctype": "imageOrigin" },
+      "ai": false,
+      "@ctype": "image"
+    };
+  }
+
+  async function htmlBlockToImageComponent(htmlBlock, fileName, blogId, seToken, sessionKey) {
+    var blob = await htmlToScreenshotBlob(htmlBlock, 700);
+
+    if (!sessionKey) {
+      if (!seToken) seToken = await getSeToken(blogId);
+      sessionKey = await getUploadSessionKey(seToken);
+    }
+
+    var imgInfo = await uploadImageBlob(sessionKey, blogId, blob, fileName || 'converted-block.png');
+
+    var fullSrc = 'https://blogfiles.pstatic.net' + imgInfo.url + '?type=w1';
+    await waitForCDN(fullSrc, 10);
+
+    return createImageComponent(imgInfo);
+  }
+
+  function needsScreenshot(element) {
+    var style = element.getAttribute('style') || '';
+    var className = element.className || '';
+
+    var complexCSS = /gradient|flex|grid|filter|transform|border-radius|backdrop|clip-path|animation|@keyframes|background-image|box-shadow/i;
+    if (complexCSS.test(style)) return true;
+    if (element.querySelector('style')) return true;
+    if (element.querySelector('svg, canvas, video')) return true;
+    if (element.tagName === 'FIGURE' && element.querySelector('svg, canvas')) return true;
+    if (element.querySelector('progress, meter')) return true;
+    if (element.tagName === 'DETAILS') return true;
+    if (/hero|card|banner|stats|timeline|glass|neon/i.test(className)) return true;
+    return false;
+  }
+
+  async function convertHtmlToNaverComponents(html, onProgress) {
+    var blogId = getBlogId();
+    if (!blogId) throw new Error('블로그 ID를 찾을 수 없습니다. 네이버 블로그 글쓰기 페이지에서 실행해주세요.');
+
+    if (onProgress) onProgress('인증 토큰 획득 중...');
+    var seToken = await getSeToken(blogId);
+    var sessionKey = await getUploadSessionKey(seToken);
+
+    if (onProgress) onProgress('HTML 분석 중...');
+
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(html, 'text/html');
+    var body = doc.body;
+
+    var hasStyleTag = /<style[\s>]/i.test(html);
+    var hasCSSVars = /:root\s*\{/.test(html);
+
+    if (hasStyleTag || hasCSSVars) {
+      if (onProgress) onProgress('전체 페이지 스크린샷 캡처 중...');
+
+      var imgComp = await htmlBlockToImageComponent(html, 'converted-page.png', blogId, seToken, sessionKey);
+      imgComp.represent = true;
+
+      var textContent = body.textContent.replace(/\s+/g, ' ').trim();
+      var seoText = textContent.substring(0, 500);
+
+      var seoComp = createTextComponent([
+        createParagraph([createTextNode(seoText, { fontSize: 'fs16' })])
+      ]);
+
+      if (onProgress) onProgress('완료!');
+      return [imgComp, seoComp];
+    }
+
+    var components = [];
+    var screenshotIndex = 0;
+    var children = Array.from(body.children);
+
+    for (var i = 0; i < children.length; i++) {
+      var child = children[i];
+      var tag = child.tagName.toUpperCase();
+
+      if (onProgress) onProgress('변환 중... (' + (i + 1) + '/' + children.length + ')');
+
+      if (needsScreenshot(child)) {
+        screenshotIndex++;
+        try {
+          var blockHtml = child.outerHTML;
+          var styleTag = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi);
+          if (styleTag) blockHtml = styleTag.join('\n') + '\n' + blockHtml;
+          var imgComp2 = await htmlBlockToImageComponent(
+            blockHtml, 'block-' + screenshotIndex + '.png', blogId, seToken, sessionKey
+          );
+          components.push(imgComp2);
+        } catch (e) {
+          console.warn('스크린샷 실패, 텍스트로 대체:', e.message);
+          var fallbackNodes = extractTextNodes(child);
+          if (fallbackNodes.length > 0) {
+            components.push(createTextComponent([createParagraph(fallbackNodes)]));
+          }
+        }
+        continue;
+      }
+
+      if (tag === 'IMG') {
+        var imgSrc = child.getAttribute('src');
+        if (imgSrc) {
+          try {
+            var imgRes = await fetch(imgSrc);
+            var imgBlob = await imgRes.blob();
+            var imgName = imgSrc.split('/').pop().split('?')[0] || 'image.png';
+            var imgInfo2 = await uploadImageBlob(sessionKey, blogId, imgBlob, imgName);
+            var fullUrl = 'https://blogfiles.pstatic.net' + imgInfo2.url + '?type=w1';
+            await waitForCDN(fullUrl, 5);
+            components.push(createImageComponent(imgInfo2));
+          } catch (e) {
+            console.warn('이미지 업로드 실패:', e.message);
+            var altText = child.getAttribute('alt') || imgSrc;
+            components.push(createTextComponent([createParagraph([createTextNode('[이미지: ' + altText + ']')])]));
+          }
+        }
+        continue;
+      }
+
+      if (tag === 'FIGURE') {
+        var figImg = child.querySelector('img');
+        var figCaption = child.querySelector('figcaption');
+        if (figImg && figImg.getAttribute('src')) {
+          try {
+            var figRes = await fetch(figImg.getAttribute('src'));
+            var figBlob = await figRes.blob();
+            var figName = figImg.getAttribute('src').split('/').pop().split('?')[0] || 'figure.png';
+            var figInfo = await uploadImageBlob(sessionKey, blogId, figBlob, figName);
+            await waitForCDN('https://blogfiles.pstatic.net' + figInfo.url + '?type=w1', 5);
+            components.push(createImageComponent(figInfo));
+          } catch (e) { console.warn('figure 이미지 실패:', e.message); }
+        }
+        if (figCaption) {
+          var capNodes = extractTextNodes(figCaption, { fontSize: 'fs13', color: '#6B7280' });
+          if (capNodes.length > 0) {
+            components.push(createTextComponent([createParagraph(capNodes)]));
+          }
+        }
+        continue;
+      }
+
+      if (tag === 'HR') {
+        components.push(createHorizontalLine());
+        continue;
+      }
+
+      if (tag === 'TABLE') {
+        var rows = parseTable(child);
+        if (rows.length > 0) {
+          var tComp = createTableComponent(rows);
+          if (tComp) components.push(tComp);
+        }
+        continue;
+      }
+
+      if (/^H[1-6]$/.test(tag)) {
+        var hNodes = extractTextNodes(child, { fontSize: headingToFontSize(tag), bold: true });
+        if (hNodes.length > 0) {
+          components.push(createTextComponent([createParagraph(hNodes, getAlignment(child))]));
+        }
+        continue;
+      }
+
+      if (tag === 'UL' || tag === 'OL') {
+        var isOrd = tag === 'OL';
+        child.querySelectorAll(':scope > li').forEach(function(li, idx) {
+          var prefix = isOrd ? (idx + 1) + '. ' : '• ';
+          var liNodes = extractTextNodes(li);
+          if (liNodes.length > 0) {
+            liNodes[0].value = prefix + liNodes[0].value;
+            components.push(createTextComponent([createParagraph(liNodes)]));
+          }
+        });
+        continue;
+      }
+
+      if (tag === 'BLOCKQUOTE') {
+        var bqNodes = extractTextNodes(child, { italic: true });
+        if (bqNodes.length > 0) {
+          bqNodes.unshift(createTextNode('┃ ', { bold: true, color: '#6B7280' }));
+          components.push(createTextComponent([createParagraph(bqNodes)]));
+        }
+        continue;
+      }
+
+      if (tag === 'PRE' || tag === 'CODE') {
+        var codeText = child.textContent.trim();
+        if (codeText) {
+          components.push(createTextComponent([
+            createParagraph([createTextNode(codeText, { fontSize: 'fs15', color: '#E8EAF0' })])
+          ]));
+        }
+        continue;
+      }
+
+      if (tag === 'A' && child.getAttribute('href')) {
+        var href = child.getAttribute('href');
+        if (href.startsWith('http')) {
+          components.push(createOgLinkComponent(href, child.textContent.trim()));
+        }
+        continue;
+      }
+
+      if (tag === 'SVG' || tag === 'CANVAS') {
+        screenshotIndex++;
+        try {
+          var svgComp = await htmlBlockToImageComponent(
+            child.outerHTML, 'svg-' + screenshotIndex + '.png', blogId, seToken, sessionKey
+          );
+          components.push(svgComp);
+        } catch (e) { console.warn('SVG/Canvas 캡처 실패:', e.message); }
+        continue;
+      }
+
+      if (tag === 'VIDEO') {
+        var videoSrc = child.getAttribute('src') || (child.querySelector('source') && child.querySelector('source').src) || '';
+        if (videoSrc) {
+          components.push(createTextComponent([createParagraph([createTextNode('🎬 동영상: ' + videoSrc)])]));
+        }
+        continue;
+      }
+
+      if (tag === 'DETAILS') {
+        var summary = child.querySelector('summary');
+        if (summary) {
+          var sumNodes = extractTextNodes(summary, { bold: true });
+          sumNodes.unshift(createTextNode('▼ ', { bold: true }));
+          components.push(createTextComponent([createParagraph(sumNodes)]));
+        }
+        var detailNodes = extractTextNodes(child);
+        if (detailNodes.length > 0) {
+          components.push(createTextComponent([createParagraph(detailNodes)]));
+        }
+        continue;
+      }
+
+      if (tag === 'FORM' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') continue;
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META') continue;
+
+      var textNodes = extractTextNodes(child);
+      if (textNodes.length > 0) {
+        var align = getAlignment(child);
+        components.push(createTextComponent([createParagraph(textNodes, align)]));
+      }
+    }
+
+    if (components.length === 0) {
+      return parseHtmlToComponents(html);
+    }
+
+    if (onProgress) onProgress('완료!');
+    return components;
+  }
+
   /**
    * 14. HTML을 SE 에디터 컴포넌트 배열로 변환 (메인 함수 - 맨 마지막!)
    */
@@ -1617,6 +2024,18 @@
       toast.style.animation = 'nbc-toast-out 0.3s ease';
       setTimeout(() => toast.remove(), 300);
     }, 2000);
+  }
+
+  /**
+   * 변환 진행 상태 표시
+   */
+  function updateStatus(message) {
+    var statusEl = container ? container.querySelector('#nbc-status') : null;
+    if (statusEl) {
+      statusEl.textContent = message;
+      statusEl.style.display = message ? 'block' : 'none';
+    }
+    if (message) console.log('[변환기]', message);
   }
 
   /**
@@ -2601,6 +3020,12 @@
           <button class="nbc-btn-clear" id="nbc-clear">🗑️ 지우기</button>
           <button class="nbc-btn-convert" id="nbc-convert">📤 블로그에 삽입</button>
         </div>
+        <div id="nbc-status" style="display:none;padding:8px 12px;margin:8px 0;background:#EEF2FF;border-radius:6px;font-size:12px;color:#4338CA;text-align:center;"></div>
+        <div style="padding:8px 12px;margin:4px 0;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;font-size:11px;color:#166534;line-height:1.5;">
+          ✅ <b>이미지 자동 변환</b>: CSS 꾸미기, 그라디언트, 플렉스 레이아웃 등이 포함된 HTML은 자동으로 스크린샷 이미지로 변환되어 네이버 에디터에 삽입됩니다.<br>
+          📝 <b>텍스트 자동 추출</b>: 이미지 사이에 SEO용 텍스트가 자동으로 배치됩니다.<br>
+          💡 <b>네이버 글쓰기 페이지</b>에서 실행해야 이미지 업로드가 작동합니다.
+        </div>
         
         <div class="nbc-footer">
           <a href="${LINKS.kakaoChat}" target="_blank">💬 문의하기</a>
@@ -3270,11 +3695,20 @@
       }
       
       showToast('변환 중...', 'info');
+
+      var components;
+      try {
+        updateStatus('변환 시작...');
+        components = await convertHtmlToNaverComponents(htmlToConvert, function(msg) {
+          updateStatus(msg);
+        });
+      } catch (e) {
+        console.warn('이미지 포함 변환 실패, 기존 방식으로 대체:', e.message);
+        updateStatus('');
+        components = parseHtmlToComponents(htmlToConvert);
+      }
       
-      // HTML → SE 컴포넌트 변환
-      const components = parseHtmlToComponents(htmlToConvert);
-      
-      if (components.length === 0) {
+      if (!components || components.length === 0) {
         showToast('변환할 내용이 없습니다.', 'warning');
         if (convertBtn) {
           convertBtn.disabled = false;
@@ -3291,6 +3725,7 @@
       if (response.success) {
         currentUsage = response.usage;
         updateState();
+        updateStatus('');
         showToast('✅ 블로그에 삽입되었습니다!', 'success');
         
         // 입력 영역 초기화

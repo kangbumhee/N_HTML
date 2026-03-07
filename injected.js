@@ -156,6 +156,19 @@
       newComponents = existing.concat([emptyLine], components);
     }
 
+    // 첫 번째 이미지를 대표 이미지로 설정
+    var foundRepresent = false;
+    newComponents.forEach(function(c) {
+      if (c['@ctype'] === 'image') {
+        if (!foundRepresent) {
+          c.represent = true;
+          foundRepresent = true;
+        } else {
+          c.represent = false;
+        }
+      }
+    });
+
     data.document.components = newComponents;
     editor.setDocumentData(data);
 
