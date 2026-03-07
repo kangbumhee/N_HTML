@@ -37,14 +37,49 @@ function getLocalDateString() {
  */
 chrome.action.onClicked.addListener(async (tab) => {
   try {
-    // content.js가 이미 주입되었는지 확인
+    const url = tab.url || '';
+    const isNaverBlog = url.includes('blog.naver.com') &&
+      (url.includes('PostWriteForm') || url.includes('postwrite'));
+
+    if (!isNaverBlog) {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const existing = document.getElementById('nbc-not-naver-alert');
+          if (existing) { existing.remove(); return; }
+
+          const overlay = document.createElement('div');
+          overlay.id = 'nbc-not-naver-alert';
+          overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:999999;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+          overlay.innerHTML = `
+            <div style="background:#fff;border-radius:16px;padding:40px 36px;max-width:420px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.3);animation:nbcFadeIn 0.3s ease;">
+              <div style="font-size:48px;margin-bottom:16px;">🚫</div>
+              <h2 style="font-size:20px;font-weight:700;color:#1f2937;margin:0 0 12px;">네이버 블로그 에디터에서만 사용 가능합니다</h2>
+              <p style="font-size:14px;color:#6b7280;line-height:1.6;margin:0 0 24px;">이 확장 프로그램은 <strong style="color:#03C75A;">네이버 블로그 글쓰기</strong> 페이지에서만 동작합니다.<br>아래 버튼을 클릭하여 글쓰기 페이지로 이동하세요.</p>
+              <a href="https://blog.naver.com/PostWriteForm.naver" target="_blank" style="display:inline-block;background:#03C75A;color:#fff;font-size:15px;font-weight:600;padding:12px 32px;border-radius:10px;text-decoration:none;margin-bottom:12px;">네이버 블로그 글쓰기로 이동 →</a>
+              <br>
+              <button id="nbc-close-alert" style="background:none;border:none;color:#9ca3af;font-size:13px;cursor:pointer;margin-top:8px;padding:4px 12px;">닫기</button>
+            </div>
+            <style>@keyframes nbcFadeIn{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}</style>
+          `;
+          document.body.appendChild(overlay);
+
+          overlay.addEventListener('click', function(e) {
+            if (e.target === overlay || e.target.id === 'nbc-close-alert') {
+              overlay.remove();
+            }
+          });
+        }
+      });
+      return;
+    }
+
     const [result] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => typeof window.__naverBlogConverterInitialized !== 'undefined'
     });
-    
+
     if (result?.result) {
-      // 이미 주입됨 - 토글만
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
@@ -54,14 +89,13 @@ chrome.action.onClicked.addListener(async (tab) => {
         }
       });
     } else {
-      // 새로 주입
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         files: ['content.js']
       });
-      
+
       await new Promise(r => setTimeout(r, 200));
-      
+
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
@@ -72,6 +106,7 @@ chrome.action.onClicked.addListener(async (tab) => {
       });
     }
   } catch (error) {
+    console.error('아이콘 클릭 에러:', error);
   }
 });
 

@@ -853,14 +853,75 @@
     return false;
   }
 
-  async function convertHtmlToNaverComponents(html, onProgress) {
+  /**
+   * injected.js에 스크린샷 요청 (CSP 우회)
+   */
+  function requestScreenshot(htmlStr, fileName, bgColor, sessionKey, blogId) {
+    return new Promise(function(resolve, reject) {
+      var requestId = 'shot_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+
+      function onResponse(event) {
+        if (event.detail.requestId !== requestId) return;
+        window.removeEventListener('nbc_response', onResponse);
+        if (event.detail.error) reject(new Error(event.detail.error));
+        else resolve(event.detail.result);
+      }
+      window.addEventListener('nbc_response', onResponse);
+
+      window.dispatchEvent(new CustomEvent('nbc_request', {
+        detail: {
+          action: 'screenshotAndUpload',
+          requestId: requestId,
+          data: { htmlStr: htmlStr, fileName: fileName, bgColor: bgColor, sessionKey: sessionKey, blogId: blogId }
+        }
+      }));
+
+      setTimeout(function() {
+        window.removeEventListener('nbc_response', onResponse);
+        reject(new Error('스크린샷 타임아웃'));
+      }, 60000);
+    });
+  }
+
+  /**
+   * injected.js에 전체 페이지 캡처 요청
+   */
+  function requestFullPageScreenshot(htmlStr, bgColor, sessionKey, blogId) {
+    return new Promise(function(resolve, reject) {
+      var requestId = 'full_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+
+      function onResponse(event) {
+        if (event.detail.requestId !== requestId) return;
+        window.removeEventListener('nbc_response', onResponse);
+        if (event.detail.error) reject(new Error(event.detail.error));
+        else resolve(event.detail.result);
+      }
+      window.addEventListener('nbc_response', onResponse);
+
+      window.dispatchEvent(new CustomEvent('nbc_request', {
+        detail: {
+          action: 'fullPageScreenshot',
+          requestId: requestId,
+          data: { htmlStr: htmlStr, bgColor: bgColor, sessionKey: sessionKey, blogId: blogId }
+        }
+      }));
+
+      setTimeout(function() {
+        window.removeEventListener('nbc_response', onResponse);
+        reject(new Error('전체 캡처 타임아웃'));
+      }, 120000);
+    });
+  }
+
+  async function convertHtmlToNaverComponents(html, onProgress, mode) {
     function log(msg) {
       console.log(msg);
       if (onProgress) onProgress(msg);
     }
 
+    mode = mode || 'mixed';
     log('═══════════════════════════════════════');
-    log('🚀 HTML → 네이버 블로그 변환 시작');
+    log('🚀 변환 시작 [모드: ' + ({ text: '텍스트만', mixed: '이미지+글', capture: '전체 캡처' }[mode]) + ']');
     log('═══════════════════════════════════════');
 
     var blogId = getBlogId();
@@ -873,12 +934,6 @@
     var sessionKey = await getUploadSessionKey(seToken);
     log('✅ 업로드 세션키 획득');
 
-    log('📦 html2canvas 로딩...');
-    await ensureHtml2Canvas();
-    log('✅ html2canvas 준비 완료');
-
-    log('📄 HTML 분석 중...');
-
     var parser = new DOMParser();
     var doc = parser.parseFromString(html, 'text/html');
     var body = doc.body;
@@ -888,118 +943,89 @@
     var linkTags = html.match(/<link[^>]*>/gi) || [];
     var linkPrefix = linkTags.join('\n');
 
+    if (mode === 'text') {
+      log('📝 텍스트 전용 변환...');
+      var textComponents = parseHtmlToComponents(html);
+      if (textComponents && textComponents.length > 0) {
+        log('✅ 완료! (' + textComponents.length + '개 텍스트 컴포넌트)');
+        return textComponents;
+      }
+      log('⚠️ 텍스트 추출 실패');
+      return [];
+    }
+
+    if (mode === 'capture') {
+      log('📷 전체 페이지 캡처 모드...');
+      log('   ⏳ 전체 HTML → 1장 이미지 변환 중...');
+      try {
+        var fullResult = await requestFullPageScreenshot(html, '#ffffff', sessionKey, blogId);
+        if (fullResult && fullResult.component) {
+          fullResult.component.represent = true;
+          log('   ✅ 캡처 완료! (' + fullResult.canvasWidth + '×' + fullResult.canvasHeight + ', ' + fullResult.blobSize + 'B)');
+          var seoText = body.textContent.replace(/\s+/g, ' ').trim();
+          var components = [fullResult.component];
+          if (seoText.length > 10) {
+            var seoComp = createTextComponent([createParagraph([createTextNode(seoText.substring(0, 2000), { fontSize: 'fs16' })])]);
+            components.push(seoComp);
+            log('   📝 SEO 텍스트 추가 (' + Math.min(seoText.length, 2000) + '자)');
+          }
+          log('✅ 전체 캡처 완료!');
+          return components;
+        }
+      } catch (e) {
+        log('❌ 전체 캡처 실패: ' + e.message);
+        log('⚠️ 텍스트 모드로 폴백...');
+        return parseHtmlToComponents(html);
+      }
+    }
+
+    log('🎨 이미지+글 혼합 변환 모드');
     var hasStyleTag = styleSheets.length > 0;
     var hasCSSVars = /:root\s*\{/.test(html);
+    if (hasStyleTag || hasCSSVars) {
+      log('   <style> 태그: ' + styleSheets.length + '개, CSS변수: ' + (hasCSSVars ? '있음' : '없음'));
+    }
 
+    var components = [];
     var screenshotIdx = 0;
+    var children = Array.from(body.children);
+    log('📋 최상위 요소: ' + children.length + '개');
 
     async function screenshotBlock(blockHtml, fileName, bgColor) {
       screenshotIdx++;
       if (!fileName) fileName = 'section-' + screenshotIdx + '.png';
-      log('   📸 스크린샷 생성: ' + fileName);
-
+      log('   📸 스크린샷: ' + fileName');
       var fullHtml = '<html><head><meta charset="UTF-8">' + linkPrefix + stylePrefix +
         '</head><body style="margin:0;padding:0;' + (bgColor ? 'background:' + bgColor + ';' : '') + '">' +
         blockHtml + '</body></html>';
-
-      var wrapper = document.createElement('div');
-      wrapper.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:99999;width:700px;overflow:visible;';
-
-      var bodyMatch = fullHtml.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-      var styleMatch = fullHtml.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || [];
-      var linkMatch2 = fullHtml.match(/<link[^>]*>/gi) || [];
-
-      if (styleMatch.length > 0 || linkMatch2.length > 0) {
-        var sc = document.createElement('div');
-        sc.innerHTML = styleMatch.join('\n') + linkMatch2.join('\n');
-        wrapper.appendChild(sc);
+      var result = await requestScreenshot(fullHtml, fileName, bgColor || '#0a0a0f', sessionKey, blogId);
+      if (result && result.component) {
+        log('   ✅ 완료 (' + result.canvasWidth + '×' + result.canvasHeight + ', ' + result.blobSize + 'B)');
+        return result.component;
       }
-      var cd = document.createElement('div');
-      cd.innerHTML = bodyMatch ? bodyMatch[1] : blockHtml;
-      wrapper.appendChild(cd);
-      document.body.appendChild(wrapper);
-
-      await new Promise(function(r) { setTimeout(r, 1200); });
-
-      var target = cd.firstElementChild || cd;
-      if (target.offsetHeight === 0) target = cd;
-
-      var canvas = await html2canvas(target, {
-        backgroundColor: bgColor || '#0a0a0f',
-        scale: 2,
-        useCORS: true,
-        allowTaint: true,
-        logging: false,
-        width: 700,
-        height: Math.max(target.offsetHeight, 100)
-      });
-      document.body.removeChild(wrapper);
-
-      var blob = await new Promise(function(r) { canvas.toBlob(r, 'image/png'); });
-      if (!blob) throw new Error('toBlob 실패: ' + fileName);
-
-      log('   ✅ 캡처 완료: ' + canvas.width + '×' + canvas.height + ' (' + blob.size + 'B)');
-
-      log('   ⬆️ 업로드 중: ' + fileName);
-      var imgInfo = await uploadImageBlob(sessionKey, blogId, blob, fileName);
-      log('   ✅ 업로드 완료: ' + imgInfo.url);
-
-      var fullSrc = 'https://blogfiles.pstatic.net' + imgInfo.url + '?type=w1';
-      log('   ⏳ CDN 전파 대기...');
-      for (var ci = 0; ci < 8; ci++) {
-        await new Promise(function(r) { setTimeout(r, 1500); });
-        try {
-          var hRes = await fetch(fullSrc, { method: 'HEAD' });
-          if (hRes.status === 200) {
-            log('   ✅ CDN 확인 (' + ((ci + 1) * 1.5).toFixed(1) + '초)');
-            break;
-          }
-        } catch (e) {}
-      }
-
-      return createImageComponent(imgInfo);
+      throw new Error('스크린샷 결과 없음');
     }
 
     function extractSeoText(element) {
-        var text = element.textContent.replace(/\s+/g, ' ').trim();
-        if (!text || text.length < 5) return null;
-        var tag = element.tagName ? element.tagName.toUpperCase() : '';
-        var isHeading = /^H[1-6]$/.test(tag);
-        var style = {};
-        if (isHeading) {
-          style.fontSize = headingToFontSize(tag);
-          style.bold = true;
-        } else {
-          style.fontSize = 'fs16';
-        }
-        var nodes = [];
-        var extracted = extractTextNodes(element, style);
-        if (extracted.length > 0) nodes = extracted;
-        else nodes = [createTextNode(text, style)];
-        return createTextComponent([createParagraph(nodes)]);
+      var text = element.textContent.replace(/\s+/g, ' ').trim();
+      if (!text || text.length < 5) return null;
+      var tag = element.tagName ? element.tagName.toUpperCase() : '';
+      var isHeading = /^H[1-6]$/.test(tag);
+      var style = {};
+      if (isHeading) { style.fontSize = headingToFontSize(tag); style.bold = true; }
+      else { style.fontSize = 'fs16'; }
+      var nodes = extractTextNodes(element, style);
+      if (nodes.length === 0) nodes = [createTextNode(text, style)];
+      return createTextComponent([createParagraph(nodes)]);
     }
 
-    if (hasStyleTag || hasCSSVars) {
-      log('🎨 스타일 HTML 감지 → 섹션별 분할 변환');
-      log('   <style> 태그: ' + styleSheets.length + '개');
-      log('   <link> 태그: ' + linkTags.length + '개');
-      log('   CSS 변수: ' + (hasCSSVars ? '있음' : '없음'));
+    for (var i = 0; i < children.length; i++) {
+      var child = children[i];
+      var tag = child.tagName ? child.tagName.toUpperCase() : '';
 
-      var components = [];
-      var children = Array.from(body.children);
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META' || tag === 'NOSCRIPT') continue;
 
-      log('📋 최상위 요소: ' + children.length + '개');
-
-      for (var i = 0; i < children.length; i++) {
-        var child = children[i];
-        var tag = child.tagName ? child.tagName.toUpperCase() : '';
-
-        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META' || tag === 'NOSCRIPT') {
-          log('   ⏭️ [' + (i + 1) + '/' + children.length + '] <' + tag + '> 건너뜀');
-          continue;
-        }
-
-        log('\n📌 [' + (i + 1) + '/' + children.length + '] <' + tag + (child.className ? '.' + child.className.split(' ')[0] : '') + '>');
+      log('\n📌 [' + (i + 1) + '/' + children.length + '] <' + tag + (child.className ? '.' + String(child.className).split(' ')[0] : '') + '>');
 
         var childText = child.textContent.replace(/\s+/g, ' ').trim();
         var childStyle = child.getAttribute('style') || '';
@@ -1019,8 +1045,8 @@
           if (/stat-|grid|hero|highlight|card|avatar|scroll-indicator|tags|meta/i.test(childInner)) isVisual = true;
         }
 
-        if (isVisual) {
-          log('   🖼️ 시각적 요소 → 스크린샷 변환');
+        if (isVisual && (hasStyleTag || hasCSSVars)) {
+          log('   🖼️ 시각적 요소 → 스크린샷');
           try {
             var imgComp = await screenshotBlock(child.outerHTML, 'visual-' + (i + 1) + '.png');
             if (components.length === 0) {
@@ -1076,11 +1102,9 @@
             continue;
           }
           if (tag === 'BLOCKQUOTE') {
-            log('   💬 인용문 → 스크린샷 + 텍스트');
-            try {
-              var bqImg = await screenshotBlock(child.outerHTML, 'quote-' + (i + 1) + '.png');
-              components.push(bqImg);
-            } catch (e) { log('   ⚠️ 인용문 스크린샷 실패'); }
+            if (hasStyleTag || hasCSSVars) {
+              try { var bqImg = await screenshotBlock(child.outerHTML, 'quote-' + (i + 1) + '.png'); components.push(bqImg); } catch (e) {}
+            }
             var bqNodes = extractTextNodes(child, { italic: true });
             if (bqNodes.length > 0) {
               bqNodes.unshift(createTextNode('┃ ', { bold: true, color: '#6B7280' }));
@@ -1104,38 +1128,23 @@
             continue;
           }
           if (tag === 'IMG') {
-            var imgSrc = child.getAttribute('src');
-            if (imgSrc) {
-              log('   🖼️ 이미지 업로드: ' + imgSrc.substring(0, 50));
-              try {
-                var imgRes = await fetch(imgSrc);
-                var imgBlob = await imgRes.blob();
-                var imgName = imgSrc.split('/').pop().split('?')[0] || 'image.png';
-                var imgInfo = await uploadImageBlob(sessionKey, blogId, imgBlob, imgName);
-                await waitForCDN('https://blogfiles.pstatic.net' + imgInfo.url + '?type=w1', 5);
-                components.push(createImageComponent(imgInfo));
-                log('   ✅ 이미지 삽입 완료');
-              } catch (e) {
-                log('   ❌ 이미지 실패: ' + e.message);
-                components.push(createTextComponent([createParagraph([createTextNode('[이미지: ' + (child.getAttribute('alt') || imgSrc) + ']')])]));
+            log('   🖼️ IMG → 스크린샷으로 업로드');
+            try {
+              var imgSrc = child.getAttribute('src');
+              if (imgSrc) {
+                var imgHtml = '<img src="' + imgSrc + '" style="max-width:100%;display:block;">';
+                var imgR = await screenshotBlock(imgHtml, 'img-' + (i + 1) + '.png', '#ffffff');
+                components.push(imgR);
               }
-            }
+            } catch (e) { log('   ❌ IMG 실패'); }
             continue;
           }
           if (tag === 'FIGURE') {
-            var figImg = child.querySelector('img');
+            try {
+              var figR = await screenshotBlock(child.outerHTML, 'fig-' + (i + 1) + '.png');
+              components.push(figR);
+            } catch (e) {}
             var figCap = child.querySelector('figcaption');
-            if (figImg && figImg.getAttribute('src')) {
-              try {
-                var fRes = await fetch(figImg.getAttribute('src'));
-                var fBlob = await fRes.blob();
-                var fName = figImg.getAttribute('src').split('/').pop().split('?')[0] || 'figure.png';
-                var fInfo = await uploadImageBlob(sessionKey, blogId, fBlob, fName);
-                await waitForCDN('https://blogfiles.pstatic.net' + fInfo.url + '?type=w1', 5);
-                components.push(createImageComponent(fInfo));
-                log('   ✅ Figure 이미지 삽입');
-              } catch (e) { log('   ❌ Figure 실패: ' + e.message); }
-            }
             if (figCap) {
               var capNodes = extractTextNodes(figCap, { fontSize: 'fs13', color: '#6B7280' });
               if (capNodes.length > 0) components.push(createTextComponent([createParagraph(capNodes)]));
@@ -1169,275 +1178,43 @@
           }
           if (tag === 'FORM' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') continue;
 
-          if (child.children && child.children.length > 0) {
-            var subChildren = Array.from(child.children);
-            var hasVisualChild = false;
-            subChildren.forEach(function(sc) {
-              var scStyle = sc.getAttribute('style') || '';
-              var scClass = sc.className || '';
-              if (/gradient|flex|grid|animation|transform/i.test(scStyle)) hasVisualChild = true;
-              if (/hero|card|stats|highlight|grid|banner/i.test(scClass)) hasVisualChild = true;
+          if (child.children && child.children.length > 0 && (hasStyleTag || hasCSSVars)) {
+            var hasVis = false;
+            Array.from(child.children).forEach(function(sc) {
+              if (/gradient|flex|grid|animation|transform/i.test(sc.getAttribute('style') || '')) hasVis = true;
+              if (/hero|card|stats|highlight|grid|banner/i.test(sc.className || '')) hasVis = true;
             });
-
-            if (hasVisualChild) {
-              log('   🖼️ 내부 시각 요소 발견 → 스크린샷');
-              try {
-                var subImg = await screenshotBlock(child.outerHTML, 'sub-' + (i + 1) + '.png');
-                components.push(subImg);
-              } catch (e) { log('   ❌ 내부 스크린샷 실패'); }
-
-              if (childText.length > 10) {
-                components.push(createTextComponent([createParagraph([createTextNode(childText, { fontSize: 'fs16' })])]));
-                log('   📝 SEO 텍스트 추가');
-              }
+            if (hasVis) {
+              try { var sI = await screenshotBlock(child.outerHTML, 'sub-' + (i + 1) + '.png'); components.push(sI); } catch (e) {}
+              if (childText.length > 10) components.push(createTextComponent([createParagraph([createTextNode(childText, { fontSize: 'fs16' })])]));
               components.push(createHorizontalLine());
-            } else {
-              var textNodes = extractTextNodes(child);
-              if (textNodes.length > 0) {
-                var align = getAlignment(child);
-                components.push(createTextComponent([createParagraph(textNodes, align)]));
-                log('   📝 텍스트: ' + childText.substring(0, 40));
-              }
-            }
-          } else {
-            var textNodes2 = extractTextNodes(child);
-            if (textNodes2.length > 0) {
-              components.push(createTextComponent([createParagraph(textNodes2, getAlignment(child))]));
-              log('   📝 텍스트: ' + childText.substring(0, 40));
+              continue;
             }
           }
-        }
-      }
 
-      if (components.length === 0) {
-        log('⚠️ 컴포넌트 0개 → 폴백 파서 사용');
-        return parseHtmlToComponents(html);
-      }
-
-      var imgCount = components.filter(function(c) { return c['@ctype'] === 'image'; }).length;
-      var txtCount = components.filter(function(c) { return c['@ctype'] === 'text'; }).length;
-      var hrCount = components.filter(function(c) { return c['@ctype'] === 'horizontalLine'; }).length;
-
-      log('\n═══════════════════════════════════════');
-      log('✅ 변환 완료!');
-      log('   📸 이미지: ' + imgCount + '장');
-      log('   📝 텍스트: ' + txtCount + '개');
-      log('   ── 구분선: ' + hrCount + '개');
-      log('   📦 총: ' + components.length + '개 컴포넌트');
-      log('═══════════════════════════════════════');
-
-      return components;
-    }
-
-    log('📝 플레인 HTML → 태그별 변환');
-
-    var components = [];
-    var children = Array.from(body.children);
-
-    log('📋 최상위 요소: ' + children.length + '개');
-
-    for (var i = 0; i < children.length; i++) {
-      var child = children[i];
-      var tag = child.tagName.toUpperCase();
-
-      log('[' + (i + 1) + '/' + children.length + '] <' + tag + '>');
-
-      if (needsScreenshot(child)) {
-        screenshotIdx++;
-        log('   🖼️ 복잡한 요소 → 스크린샷');
-        try {
-          var blockHtml = child.outerHTML;
-          var styleTag2 = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi);
-          if (styleTag2) blockHtml = styleTag2.join('\n') + '\n' + blockHtml;
-          var imgComp2 = await htmlBlockToImageComponent(
-            blockHtml, 'block-' + screenshotIdx + '.png', blogId, seToken, sessionKey
-          );
-          components.push(imgComp2);
-          log('   ✅ 스크린샷 삽입 완료');
-        } catch (e) {
-          log('   ❌ 스크린샷 실패, 텍스트로 대체');
-          var fallbackNodes = extractTextNodes(child);
-          if (fallbackNodes.length > 0) {
-            components.push(createTextComponent([createParagraph(fallbackNodes)]));
+          var tN = extractTextNodes(child);
+          if (tN.length > 0) {
+            components.push(createTextComponent([createParagraph(tN, getAlignment(child))]));
+            log('   📝 텍스트');
           }
         }
-        continue;
-      }
-
-      if (tag === 'IMG') {
-        var imgSrc = child.getAttribute('src');
-        if (imgSrc) {
-          log('   🖼️ 이미지 업로드...');
-          try {
-            var imgRes = await fetch(imgSrc);
-            var imgBlob = await imgRes.blob();
-            var imgName = imgSrc.split('/').pop().split('?')[0] || 'image.png';
-            var imgInfo2 = await uploadImageBlob(sessionKey, blogId, imgBlob, imgName);
-            var fullUrl = 'https://blogfiles.pstatic.net' + imgInfo2.url + '?type=w1';
-            await waitForCDN(fullUrl, 5);
-            components.push(createImageComponent(imgInfo2));
-            log('   ✅ 이미지 삽입 완료');
-          } catch (e) {
-            log('   ❌ 이미지 실패: ' + e.message);
-            var altText = child.getAttribute('alt') || imgSrc;
-            components.push(createTextComponent([createParagraph([createTextNode('[이미지: ' + altText + ']')])]));
-          }
-        }
-        continue;
-      }
-
-      if (tag === 'FIGURE') {
-        var figImg = child.querySelector('img');
-        var figCaption = child.querySelector('figcaption');
-        if (figImg && figImg.getAttribute('src')) {
-          try {
-            var figRes = await fetch(figImg.getAttribute('src'));
-            var figBlob = await figRes.blob();
-            var figName = figImg.getAttribute('src').split('/').pop().split('?')[0] || 'figure.png';
-            var figInfo = await uploadImageBlob(sessionKey, blogId, figBlob, figName);
-            await waitForCDN('https://blogfiles.pstatic.net' + figInfo.url + '?type=w1', 5);
-            components.push(createImageComponent(figInfo));
-            log('   ✅ Figure 삽입');
-          } catch (e) { log('   ❌ Figure 실패: ' + e.message); }
-        }
-        if (figCaption) {
-          var capNodes = extractTextNodes(figCaption, { fontSize: 'fs13', color: '#6B7280' });
-          if (capNodes.length > 0) {
-            components.push(createTextComponent([createParagraph(capNodes)]));
-          }
-        }
-        continue;
-      }
-
-      if (tag === 'HR') {
-        components.push(createHorizontalLine());
-        log('   ── 구분선');
-        continue;
-      }
-
-      if (tag === 'TABLE') {
-        var rows = parseTable(child);
-        if (rows.length > 0) {
-          var tComp = createTableComponent(rows);
-          if (tComp) { components.push(tComp); log('   📊 테이블'); }
-        }
-        continue;
-      }
-
-      if (/^H[1-6]$/.test(tag)) {
-        var hNodes = extractTextNodes(child, { fontSize: headingToFontSize(tag), bold: true });
-        if (hNodes.length > 0) {
-          components.push(createTextComponent([createParagraph(hNodes, getAlignment(child))]));
-          log('   🔤 제목: ' + child.textContent.trim().substring(0, 30));
-        }
-        continue;
-      }
-
-      if (tag === 'UL' || tag === 'OL') {
-        var isOrd = tag === 'OL';
-        child.querySelectorAll(':scope > li').forEach(function(li, idx) {
-          var prefix = isOrd ? (idx + 1) + '. ' : '• ';
-          var liNodes = extractTextNodes(li);
-          if (liNodes.length > 0) {
-            liNodes[0].value = prefix + liNodes[0].value;
-            components.push(createTextComponent([createParagraph(liNodes)]));
-          }
-        });
-        log('   📋 목록');
-        continue;
-      }
-
-      if (tag === 'BLOCKQUOTE') {
-        var bqNodes = extractTextNodes(child, { italic: true });
-        if (bqNodes.length > 0) {
-          bqNodes.unshift(createTextNode('┃ ', { bold: true, color: '#6B7280' }));
-          components.push(createTextComponent([createParagraph(bqNodes)]));
-          log('   💬 인용문');
-        }
-        continue;
-      }
-
-      if (tag === 'PRE' || tag === 'CODE') {
-        var codeText = child.textContent.trim();
-        if (codeText) {
-          components.push(createTextComponent([
-            createParagraph([createTextNode(codeText, { fontSize: 'fs15', color: '#E8EAF0' })])
-          ]));
-          log('   💻 코드 블록');
-        }
-        continue;
-      }
-
-      if (tag === 'A' && child.getAttribute('href')) {
-        var href = child.getAttribute('href');
-        if (href.startsWith('http')) {
-          components.push(createOgLinkComponent(href, child.textContent.trim()));
-          log('   🔗 링크');
-        }
-        continue;
-      }
-
-      if (tag === 'SVG' || tag === 'CANVAS') {
-        screenshotIdx++;
-        log('   🎨 SVG/Canvas 캡처...');
-        try {
-          var svgComp = await htmlBlockToImageComponent(
-            child.outerHTML, 'svg-' + screenshotIdx + '.png', blogId, seToken, sessionKey
-          );
-          components.push(svgComp);
-        } catch (e) { log('   ❌ SVG 실패'); }
-        continue;
-      }
-
-      if (tag === 'VIDEO') {
-        var videoSrc = child.getAttribute('src') || (child.querySelector('source') && child.querySelector('source').src) || '';
-        if (videoSrc) {
-          components.push(createTextComponent([createParagraph([createTextNode('🎬 동영상: ' + videoSrc)])]));
-          log('   🎬 동영상 링크');
-        }
-        continue;
-      }
-
-      if (tag === 'DETAILS') {
-        var summary = child.querySelector('summary');
-        if (summary) {
-          var sumNodes = extractTextNodes(summary, { bold: true });
-          sumNodes.unshift(createTextNode('▼ ', { bold: true }));
-          components.push(createTextComponent([createParagraph(sumNodes)]));
-        }
-        var detailNodes = extractTextNodes(child);
-        if (detailNodes.length > 0) {
-          components.push(createTextComponent([createParagraph(detailNodes)]));
-        }
-        log('   📂 Details');
-        continue;
-      }
-
-      if (tag === 'FORM' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') continue;
-      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META') continue;
-
-      var textNodes = extractTextNodes(child);
-      if (textNodes.length > 0) {
-        var align = getAlignment(child);
-        components.push(createTextComponent([createParagraph(textNodes, align)]));
-        log('   📝 텍스트: ' + child.textContent.trim().substring(0, 40));
       }
     }
 
     if (components.length === 0) {
-      log('⚠️ 컴포넌트 0개 → 폴백 파서 사용');
+      log('⚠️ 0개 → 폴백 파서');
       return parseHtmlToComponents(html);
     }
 
-    var imgCount = components.filter(function(c) { return c['@ctype'] === 'image'; }).length;
-    var txtCount = components.filter(function(c) { return c['@ctype'] === 'text'; }).length;
-    var hrCount = components.filter(function(c) { return c['@ctype'] === 'horizontalLine'; }).length;
+    var ic = components.filter(function(c) { return c['@ctype'] === 'image'; }).length;
+    var tc = components.filter(function(c) { return c['@ctype'] === 'text'; }).length;
+    var hc = components.filter(function(c) { return c['@ctype'] === 'horizontalLine'; }).length;
 
     log('\n═══════════════════════════════════════');
     log('✅ 변환 완료!');
-    log('   📸 이미지: ' + imgCount + '장');
-    log('   📝 텍스트: ' + txtCount + '개');
-    log('   ── 구분선: ' + hrCount + '개');
+    log('   📸 이미지: ' + ic + '장');
+    log('   📝 텍스트: ' + tc + '개');
+    log('   ── 구분선: ' + hc + '개');
     log('   📦 총: ' + components.length + '개 컴포넌트');
     log('═══════════════════════════════════════');
 
@@ -2398,6 +2175,8 @@
     }, 2000);
   }
 
+  var currentConvertMode = 'mixed';
+
   /**
    * 상태 표시 — 콘솔 스타일 로그 누적
    */
@@ -2428,6 +2207,33 @@
     }
 
     el.scrollTop = el.scrollHeight;
+  }
+
+  /**
+   * 모드 버튼 이벤트 바인딩
+   */
+  function initModeSelector() {
+    if (!container) return;
+    var buttons = container.querySelectorAll('.nbc-mode-btn');
+    buttons.forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        currentConvertMode = btn.getAttribute('data-mode');
+        buttons.forEach(function(b) {
+          b.style.border = '2px solid #E5E7EB';
+          b.style.background = '#fff';
+          var label = b.querySelector('div:nth-child(2)');
+          var sub = b.querySelector('div:nth-child(3)');
+          if (label) label.style.color = '#374151';
+          if (sub) sub.style.color = '#9CA3AF';
+        });
+        btn.style.border = '2px solid #5B7FFF';
+        btn.style.background = '#EEF2FF';
+        var activeLabel = btn.querySelector('div:nth-child(2)');
+        var activeSub = btn.querySelector('div:nth-child(3)');
+        if (activeLabel) activeLabel.style.color = '#5B7FFF';
+        if (activeSub) activeSub.style.color = '#818CF8';
+      });
+    });
   }
 
   /**
@@ -3408,6 +3214,27 @@
           📋 감지: <span id="nbc-stats">텍스트 0 | 표 0 | 링크 0</span>
         </div>
         
+        <div id="nbc-mode-selector" style="margin:12px 0;padding:0;">
+          <div style="font-size:12px;font-weight:700;color:#374151;margin-bottom:8px;">변환 모드 선택</div>
+          <div style="display:flex;gap:6px;">
+            <button class="nbc-mode-btn" data-mode="text" style="flex:1;padding:10px 6px;border:2px solid #E5E7EB;border-radius:10px;background:#fff;cursor:pointer;text-align:center;font-size:11px;color:#374151;transition:all 0.2s;">
+              <div style="font-size:22px;margin-bottom:4px;">📝</div>
+              <div style="font-weight:700;">텍스트만</div>
+              <div style="color:#9CA3AF;font-size:10px;margin-top:2px;">글만 변환</div>
+            </button>
+            <button class="nbc-mode-btn nbc-mode-active" data-mode="mixed" style="flex:1;padding:10px 6px;border:2px solid #5B7FFF;border-radius:10px;background:#EEF2FF;cursor:pointer;text-align:center;font-size:11px;color:#374151;transition:all 0.2s;">
+              <div style="font-size:22px;margin-bottom:4px;">🖼️📝</div>
+              <div style="font-weight:700;color:#5B7FFF;">이미지+글</div>
+              <div style="color:#818CF8;font-size:10px;margin-top:2px;">추천 · SEO 최적</div>
+            </button>
+            <button class="nbc-mode-btn" data-mode="capture" style="flex:1;padding:10px 6px;border:2px solid #E5E7EB;border-radius:10px;background:#fff;cursor:pointer;text-align:center;font-size:11px;color:#374151;transition:all 0.2s;">
+              <div style="font-size:22px;margin-bottom:4px;">📷</div>
+              <div style="font-weight:700;">전체 캡처</div>
+              <div style="color:#9CA3AF;font-size:10px;margin-top:2px;">1장 이미지</div>
+            </button>
+          </div>
+        </div>
+        
         <div class="nbc-actions">
           <button class="nbc-btn-clear" id="nbc-clear">🗑️ 지우기</button>
           <button class="nbc-btn-convert" id="nbc-convert">📤 블로그에 삽입</button>
@@ -3763,6 +3590,8 @@
       });
     });
 
+    initModeSelector();
+
     // 드래그 및 리사이즈 이벤트는 별도 함수에서 처리
     setupDragAndResize();
   }
@@ -4106,7 +3935,7 @@
         updateStatus('🚀 변환 시작...');
         components = await convertHtmlToNaverComponents(htmlToConvert, function(msg) {
           updateStatus(msg);
-        });
+        }, currentConvertMode);
       } catch (e) {
         console.warn('이미지 포함 변환 실패, 기존 방식으로 대체:', e.message);
         updateStatus('⚠️ 이미지 없이 텍스트만 변환합니다...');
