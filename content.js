@@ -994,7 +994,7 @@
     async function screenshotBlock(blockHtml, fileName, bgColor) {
       screenshotIdx++;
       if (!fileName) fileName = 'section-' + screenshotIdx + '.png';
-      log('   📸 스크린샷: ' + fileName');
+      log('   📸 스크린샷: ' + fileName);
       var fullHtml = '<html><head><meta charset="UTF-8">' + linkPrefix + stylePrefix +
         '</head><body style="margin:0;padding:0;' + (bgColor ? 'background:' + bgColor + ';' : '') + '">' +
         blockHtml + '</body></html>';
