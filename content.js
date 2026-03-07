@@ -209,36 +209,54 @@
   }
 
   /**
-   * 5-4. 다크 테마 감지
+   * 5-4. 테마 감지 (다크/라이트/플레인)
    */
-  function detectDarkTheme(html) {
+  function detectTheme(html) {
     const vars = extractCssVars(html);
 
-    // 1) --bg 변수 체크
-    const bgVar = vars['--bg'];
-    if (bgVar && isColorDark(bgVar)) return { isDark: true, vars };
-
-    // 2) body { background: xxx } 체크
-    const bodyBgMatch = html.match(/body\s*\{[^}]*?background\s*:\s*([^;}\s]+)/);
-    if (bodyBgMatch) {
-      const resolved = resolveCssVar(bodyBgMatch[1], vars);
-      if (isColorDark(resolved)) {
-        if (!vars['--bg']) vars['--bg'] = resolved;
-        return { isDark: true, vars };
-      }
+    function tryHex(val) {
+      if (!val) return null;
+      val = val.trim();
+      if (val.startsWith('#')) return val;
+      var m = val.match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/);
+      if (m) return '#' + [m[1], m[2], m[3]].map(function(x) { return ('0' + parseInt(x).toString(16)).slice(-2); }).join('');
+      return colorToHex(val);
     }
 
-    // 3) body { background-color: xxx } 체크
-    const bodyBgcMatch = html.match(/body\s*\{[^}]*?background-color\s*:\s*([^;}\s]+)/);
-    if (bodyBgcMatch) {
-      const resolved2 = resolveCssVar(bodyBgcMatch[1], vars);
-      if (isColorDark(resolved2)) {
-        if (!vars['--bg']) vars['--bg'] = resolved2;
-        return { isDark: true, vars };
+    function getBodyBg() {
+      var m1 = html.match(/body\s*\{[^}]*?background-color\s*:\s*([^;}\s]+)/);
+      if (m1) {
+        var resolved = resolveCssVar(m1[1], vars);
+        var hex = tryHex(resolved);
+        if (hex) return hex;
       }
+      var m2 = html.match(/body\s*\{[^}]*?background\s*:\s*([^;}\s]+)/);
+      if (m2) {
+        var resolved2 = resolveCssVar(m2[1], vars);
+        var hex2 = tryHex(resolved2);
+        if (hex2) return hex2;
+      }
+      return null;
     }
 
-    return { isDark: false, vars };
+    var bgFromVar = vars['--bg'] ? tryHex(resolveCssVar(vars['--bg'], vars)) : null;
+    var bgFromBody = getBodyBg();
+    var bg = bgFromVar || bgFromBody || null;
+    if (bg) vars['--bg'] = bg;
+
+    if (bg && isColorDark(bg)) {
+      return { type: 'dark', vars: vars, bgColor: bg };
+    }
+
+    var hasVars = Object.keys(vars).length > 0;
+    var hasStyleTag = /<style[\s>]/i.test(html);
+    var hasStyledClasses = /\.hero|\.disclaimer|\.quote|\.cta|\.timeline|\.inv-group|\.table-wrap/.test(html);
+
+    if (hasVars || hasStyledClasses || hasStyleTag) {
+      return { type: 'light', vars: vars, bgColor: bg || '#FFFFFF' };
+    }
+
+    return { type: 'plain', vars: vars, bgColor: null };
   }
 
   /**
@@ -651,13 +669,15 @@
    * 14. HTML을 SE 에디터 컴포넌트 배열로 변환 (메인 함수 - 맨 마지막!)
    */
   function parseHtmlToComponents(html) {
-    // 다크 테마 감지
-    const darkInfo = detectDarkTheme(html);
-    if (darkInfo.isDark) {
-      return parseUniversalToComponents(html, darkInfo.vars, 'dark', darkInfo.vars['--bg']);
+    // 테마 감지 (다크/라이트/플레인)
+    const themeInfo = detectTheme(html);
+
+    // 다크 또는 라이트 스타일 → 유니버설 파서 (megaCell)
+    if (themeInfo.type === 'dark' || themeInfo.type === 'light') {
+      return parseUniversalToComponents(html, themeInfo.vars, themeInfo.type, themeInfo.bgColor);
     }
 
-    // 기존 라이트 테마 처리
+    // 플레인 HTML만 기존 파서
     const components = [];
 
     const parser = new DOMParser();
