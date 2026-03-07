@@ -867,24 +867,298 @@
     var doc = parser.parseFromString(html, 'text/html');
     var body = doc.body;
 
-    var hasStyleTag = /<style[\s>]/i.test(html);
+    var styleSheets = html.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || [];
+    var stylePrefix = styleSheets.join('\n');
+    var linkTags = html.match(/<link[^>]*>/gi) || [];
+    var linkPrefix = linkTags.join('\n');
+
+    var hasStyleTag = styleSheets.length > 0;
     var hasCSSVars = /:root\s*\{/.test(html);
 
     if (hasStyleTag || hasCSSVars) {
-      if (onProgress) onProgress('전체 페이지 스크린샷 캡처 중...');
+      if (onProgress) onProgress('스타일 HTML 감지 → 섹션별 분할 변환 시작...');
 
-      var imgComp = await htmlBlockToImageComponent(html, 'converted-page.png', blogId, seToken, sessionKey);
-      imgComp.represent = true;
+      var components = [];
+      var screenshotIdx = 0;
+      var children = Array.from(body.children);
 
-      var textContent = body.textContent.replace(/\s+/g, ' ').trim();
-      var seoText = textContent.substring(0, 500);
+      async function screenshotBlock(blockHtml, fileName) {
+        screenshotIdx++;
+        var fullHtml = '<html><head><meta charset="UTF-8">' + linkPrefix + stylePrefix + '</head><body style="margin:0;padding:0;">' + blockHtml + '</body></html>';
+        var blob = await htmlToScreenshotBlob(fullHtml, 700);
+        var imgInfo = await uploadImageBlob(sessionKey, blogId, blob, fileName || ('section-' + screenshotIdx + '.png'));
+        var fullSrc = 'https://blogfiles.pstatic.net' + imgInfo.url + '?type=w1';
+        await waitForCDN(fullSrc, 8);
+        return createImageComponent(imgInfo);
+      }
 
-      var seoComp = createTextComponent([
-        createParagraph([createTextNode(seoText, { fontSize: 'fs16' })])
-      ]);
+      function extractSeoText(element) {
+        var text = element.textContent.replace(/\s+/g, ' ').trim();
+        if (!text || text.length < 5) return null;
+        var tag = element.tagName ? element.tagName.toUpperCase() : '';
+        var isHeading = /^H[1-6]$/.test(tag);
+        var style = {};
+        if (isHeading) {
+          style.fontSize = headingToFontSize(tag);
+          style.bold = true;
+        } else {
+          style.fontSize = 'fs16';
+        }
+        var nodes = [];
+        var extracted = extractTextNodes(element, style);
+        if (extracted.length > 0) nodes = extracted;
+        else nodes = [createTextNode(text, style)];
+        return createTextComponent([createParagraph(nodes)]);
+      }
 
+      for (var i = 0; i < children.length; i++) {
+        var child = children[i];
+        var tag = child.tagName ? child.tagName.toUpperCase() : '';
+
+        if (onProgress) onProgress('섹션 변환 중... (' + (i + 1) + '/' + children.length + ')');
+
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META' || tag === 'NOSCRIPT') continue;
+
+        var childText = child.textContent.replace(/\s+/g, ' ').trim();
+        var childStyle = child.getAttribute('style') || '';
+        var childClass = child.className || '';
+        var childInner = child.innerHTML || '';
+
+        var isVisual = false;
+        if (/hero|stats|grid|card|highlight|banner|gradient|glass|neon|timeline/i.test(childClass)) isVisual = true;
+        if (/gradient|flex|grid|animation|transform|clip-path|backdrop|border-radius/i.test(childStyle)) isVisual = true;
+        if (child.querySelector && (
+          child.querySelector('.hero, .stats-grid, .stat-item, .highlight-card, .tags, .scroll-indicator, .author-avatar') ||
+          child.querySelector('svg, canvas, video, progress, meter') ||
+          child.querySelector('[class*="grid"], [class*="flex"], [class*="card"], [class*="stat"], [class*="hero"]')
+        )) isVisual = true;
+        if (/display\s*:\s*(flex|grid)/i.test(childInner) || /display\s*:\s*(flex|grid)/i.test(childStyle)) isVisual = true;
+        if ((tag === 'SECTION' || tag === 'ARTICLE' || tag === 'DIV') && child.children && child.children.length > 0) {
+          var innerClasses = child.innerHTML;
+          if (/stat-|grid|hero|highlight|card|avatar|scroll-indicator|tags/i.test(innerClasses)) isVisual = true;
+        }
+
+        if (isVisual) {
+          try {
+            var imgComp = await screenshotBlock(child.outerHTML, 'visual-' + screenshotIdx + '.png');
+            if (components.length === 0) imgComp.represent = true;
+            components.push(imgComp);
+          } catch (e) { console.warn('스크린샷 실패:', e.message); }
+
+          if (childText.length > 10) {
+            var subElements = child.querySelectorAll ? child.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,span,div') : [];
+            var seoAdded = false;
+            subElements.forEach(function(sub) {
+              var subText = sub.textContent.replace(/\s+/g, ' ').trim();
+              if (subText.length > 10) {
+                if (subText === childText && subElements.length > 1) return;
+                var seoComp = extractSeoText(sub);
+                if (seoComp) { components.push(seoComp); seoAdded = true; }
+              }
+            });
+            if (!seoAdded && childText.length > 10) {
+              components.push(createTextComponent([createParagraph([createTextNode(childText, { fontSize: 'fs16' })])]));
+            }
+          }
+          components.push(createHorizontalLine());
+        } else {
+          if (tag === 'HR') {
+            components.push(createHorizontalLine());
+            continue;
+          }
+          if (tag === 'TABLE') {
+            var rows = parseTable(child);
+            if (rows.length > 0) {
+              var tComp = createTableComponent(rows);
+              if (tComp) components.push(tComp);
+            }
+            continue;
+          }
+          if (/^H[1-6]$/.test(tag)) {
+            var hNodes = extractTextNodes(child, { fontSize: headingToFontSize(tag), bold: true });
+            if (hNodes.length > 0) components.push(createTextComponent([createParagraph(hNodes, getAlignment(child))]));
+            continue;
+          }
+          if (tag === 'BLOCKQUOTE') {
+            try {
+              var bqImg = await screenshotBlock(child.outerHTML, 'quote-' + screenshotIdx + '.png');
+              components.push(bqImg);
+            } catch (e) {}
+            var bqNodes = extractTextNodes(child, { italic: true });
+            if (bqNodes.length > 0) {
+              bqNodes.unshift(createTextNode('┃ ', { bold: true, color: '#6B7280' }));
+              components.push(createTextComponent([createParagraph(bqNodes)]));
+            }
+            continue;
+          }
+          if (tag === 'UL' || tag === 'OL') {
+            var isOrd = tag === 'OL';
+            child.querySelectorAll(':scope > li').forEach(function(li, idx) {
+              var prefix = isOrd ? (idx + 1) + '. ' : '• ';
+              var liNodes = extractTextNodes(li);
+              if (liNodes.length > 0) {
+                liNodes[0].value = prefix + liNodes[0].value;
+                components.push(createTextComponent([createParagraph(liNodes)]));
+              }
+            });
+            continue;
+          }
+          if (tag === 'IMG') {
+            var imgSrc = child.getAttribute('src');
+            if (imgSrc) {
+              try {
+                var imgRes = await fetch(imgSrc);
+                var imgBlob = await imgRes.blob();
+                var imgName = imgSrc.split('/').pop().split('?')[0] || 'image.png';
+                var imgInfo = await uploadImageBlob(sessionKey, blogId, imgBlob, imgName);
+                await waitForCDN('https://blogfiles.pstatic.net' + imgInfo.url + '?type=w1', 5);
+                components.push(createImageComponent(imgInfo));
+              } catch (e) {
+                components.push(createTextComponent([createParagraph([createTextNode('[이미지: ' + (child.getAttribute('alt') || imgSrc) + ']')])]));
+              }
+            }
+            continue;
+          }
+          if (tag === 'FIGURE') {
+            var figImg = child.querySelector('img');
+            var figCap = child.querySelector('figcaption');
+            if (figImg && figImg.getAttribute('src')) {
+              try {
+                var fRes = await fetch(figImg.getAttribute('src'));
+                var fBlob = await fRes.blob();
+                var fName = figImg.getAttribute('src').split('/').pop().split('?')[0] || 'figure.png';
+                var fInfo = await uploadImageBlob(sessionKey, blogId, fBlob, fName);
+                await waitForCDN('https://blogfiles.pstatic.net' + fInfo.url + '?type=w1', 5);
+                components.push(createImageComponent(fInfo));
+              } catch (e) {}
+            }
+            if (figCap) {
+              var capNodes = extractTextNodes(figCap, { fontSize: 'fs13', color: '#6B7280' });
+              if (capNodes.length > 0) components.push(createTextComponent([createParagraph(capNodes)]));
+            }
+            continue;
+          }
+          if (tag === 'A' && child.getAttribute('href')) {
+            var href = child.getAttribute('href');
+            if (href.startsWith('http')) components.push(createOgLinkComponent(href, child.textContent.trim()));
+            continue;
+          }
+          if (tag === 'SVG' || tag === 'CANVAS') {
+            try {
+              var svgComp = await screenshotBlock(child.outerHTML, 'svg-' + screenshotIdx + '.png');
+              components.push(svgComp);
+            } catch (e) {}
+            continue;
+          }
+          if (tag === 'FOOTER') {
+            var footerNodes = extractTextNodes(child, { fontSize: 'fs13', color: '#6B7280' });
+            if (footerNodes.length > 0) {
+              components.push(createHorizontalLine());
+              components.push(createTextComponent([createParagraph(footerNodes, 'center')]));
+            }
+            continue;
+          }
+          if (tag === 'FORM' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') continue;
+
+          if (child.children && child.children.length > 0) {
+            var subChildren = Array.from(child.children);
+            for (var j = 0; j < subChildren.length; j++) {
+              var sub = subChildren[j];
+              var subTag = sub.tagName ? sub.tagName.toUpperCase() : '';
+              var subClass = sub.className || '';
+              var subStyle = sub.getAttribute('style') || '';
+              var subInner = sub.innerHTML || '';
+
+              var subIsVisual = false;
+              if (/hero|stats|grid|card|highlight|banner|tags|avatar/i.test(subClass)) subIsVisual = true;
+              if (/gradient|flex|grid|animation|transform/i.test(subStyle)) subIsVisual = true;
+              if (sub.querySelector && sub.querySelector('.stat-item, .highlight-card, .tag, .hero-content, .scroll-indicator, [class*="grid"], [class*="stat"]')) subIsVisual = true;
+              if (/display\s*:\s*(flex|grid)/i.test(subInner) || /display\s*:\s*(flex|grid)/i.test(subStyle)) subIsVisual = true;
+
+              if (subIsVisual) {
+                try {
+                  var subImg = await screenshotBlock(sub.outerHTML, 'sub-' + screenshotIdx + '.png');
+                  if (components.length === 0 || !components.some(function(c) { return c.represent; })) subImg.represent = true;
+                  components.push(subImg);
+                } catch (e) {}
+                var subText = sub.textContent.replace(/\s+/g, ' ').trim();
+                if (subText.length > 10) {
+                  var subSubs = sub.querySelectorAll ? sub.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,span,div') : [];
+                  subSubs.forEach(function(s) {
+                    var sText = s.textContent.replace(/\s+/g, ' ').trim();
+                    if (sText.length > 10 && sText !== subText) {
+                      var sc = extractSeoText(s);
+                      if (sc) components.push(sc);
+                    }
+                  });
+                }
+                components.push(createHorizontalLine());
+              } else {
+                if (/^H[1-6]$/.test(subTag)) {
+                  var shNodes = extractTextNodes(sub, { fontSize: headingToFontSize(subTag), bold: true });
+                  if (shNodes.length > 0) components.push(createTextComponent([createParagraph(shNodes)]));
+                } else if (subTag === 'BLOCKQUOTE') {
+                  try {
+                    var sbqImg = await screenshotBlock(sub.outerHTML, 'bq-' + screenshotIdx + '.png');
+                    components.push(sbqImg);
+                  } catch (e) {}
+                  var sbqNodes = extractTextNodes(sub, { italic: true });
+                  if (sbqNodes.length > 0) {
+                    sbqNodes.unshift(createTextNode('┃ ', { bold: true, color: '#6B7280' }));
+                    components.push(createTextComponent([createParagraph(sbqNodes)]));
+                  }
+                } else if (subTag === 'UL' || subTag === 'OL') {
+                  var sIsOrd = subTag === 'OL';
+                  sub.querySelectorAll(':scope > li').forEach(function(li, idx) {
+                    var prefix = sIsOrd ? (idx + 1) + '. ' : '• ';
+                    var liNodes = extractTextNodes(li);
+                    if (liNodes.length > 0) {
+                      liNodes[0].value = prefix + liNodes[0].value;
+                      components.push(createTextComponent([createParagraph(liNodes)]));
+                    }
+                  });
+                } else if (subTag === 'HR') {
+                  components.push(createHorizontalLine());
+                } else if (subTag === 'P' || subTag === 'DIV' || subTag === 'SPAN' || subTag === 'ARTICLE' || subTag === 'SECTION' || subTag === 'HEADER' || subTag === 'MAIN' || subTag === 'ASIDE' || subTag === 'NAV') {
+                  if (sub.children && sub.children.length > 0 && sub.querySelector && sub.querySelector('[class*="grid"], [class*="stat"], [class*="card"], [class*="hero"], [class*="highlight"], [class*="tag"]')) {
+                    try {
+                      var deepImg = await screenshotBlock(sub.outerHTML, 'deep-' + screenshotIdx + '.png');
+                      components.push(deepImg);
+                    } catch (e) {}
+                    var deepText = sub.textContent.replace(/\s+/g, ' ').trim();
+                    if (deepText.length > 10) {
+                      components.push(createTextComponent([createParagraph([createTextNode(deepText, { fontSize: 'fs16' })])]));
+                    }
+                  } else {
+                    var pNodes = extractTextNodes(sub);
+                    if (pNodes.length > 0) components.push(createTextComponent([createParagraph(pNodes)]));
+                  }
+                } else if (subTag === 'FOOTER') {
+                  var ftNodes = extractTextNodes(sub, { fontSize: 'fs13', color: '#6B7280' });
+                  if (ftNodes.length > 0) {
+                    components.push(createHorizontalLine());
+                    components.push(createTextComponent([createParagraph(ftNodes, 'center')]));
+                  }
+                } else {
+                  var genNodes = extractTextNodes(sub);
+                  if (genNodes.length > 0) components.push(createTextComponent([createParagraph(genNodes)]));
+                }
+              }
+            }
+          } else {
+            if (childText.length > 0) {
+              var leafNodes = extractTextNodes(child);
+              if (leafNodes.length > 0) {
+                components.push(createTextComponent([createParagraph(leafNodes, getAlignment(child))]));
+              }
+            }
+          }
+        }
+      }
+
+      if (components.length === 0) return parseHtmlToComponents(html);
       if (onProgress) onProgress('완료!');
-      return [imgComp, seoComp];
+      return components;
     }
 
     var components = [];
