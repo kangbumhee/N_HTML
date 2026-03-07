@@ -305,51 +305,57 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true; // 비동기 응답
       }
 
-      // ═══════════════════ captureHtmlAsImage (새 탭 + captureVisibleTab) ═══════════════════
+      // ═══════════════════ captureHtmlAsImage (확장 페이지 capture.html + captureVisibleTab) ═══════════════════
       if (request.action === 'captureHtmlAsImage') {
         (async () => {
           let newTabId = null;
           try {
             const html = request.html;
-            const viewportWidth = request.width || 1400;
 
+            const captureUrl = chrome.runtime.getURL('capture.html');
             const tab = await chrome.tabs.create({
-              url: 'about:blank',
+              url: captureUrl,
               active: true
             });
             newTabId = tab.id;
 
-            await new Promise(resolve => setTimeout(resolve, 300));
+            await new Promise((resolve) => {
+              const listener = (tabId, info) => {
+                if (tabId === newTabId && info.status === 'complete') {
+                  chrome.tabs.onUpdated.removeListener(listener);
+                  resolve();
+                }
+              };
+              chrome.tabs.onUpdated.addListener(listener);
+            });
+
+            await new Promise(r => setTimeout(r, 500));
 
             await chrome.scripting.executeScript({
               target: { tabId: newTabId },
-              func: (htmlContent, vpWidth) => {
+              func: (htmlContent) => {
                 document.open();
                 document.write(htmlContent);
                 document.close();
-                if (!document.querySelector('meta[name="viewport"]')) {
-                  const meta = document.createElement('meta');
-                  meta.name = 'viewport';
-                  meta.content = 'width=' + vpWidth;
-                  document.head.appendChild(meta);
-                }
               },
-              args: [html, viewportWidth]
+              args: [html]
             });
 
-            await new Promise(resolve => setTimeout(resolve, 2500));
+            await new Promise(r => setTimeout(r, 3000));
 
-            await chrome.scripting.executeScript({
-              target: { tabId: newTabId },
-              func: () => document.fonts.ready
-            });
-            await new Promise(resolve => setTimeout(resolve, 500));
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: newTabId },
+                func: () => document.fonts.ready
+              });
+            } catch (e) {}
+
+            await new Promise(r => setTimeout(r, 500));
 
             const [{ result: dims }] = await chrome.scripting.executeScript({
               target: { tabId: newTabId },
               func: () => ({
                 scrollHeight: document.documentElement.scrollHeight,
-                clientWidth: document.documentElement.clientWidth,
                 clientHeight: window.innerHeight
               })
             });
