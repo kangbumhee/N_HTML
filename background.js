@@ -304,7 +304,113 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         
         return true; // 비동기 응답
       }
-      
+
+      // ═══════════════════ captureHtmlAsImage (새 탭 + captureVisibleTab) ═══════════════════
+      if (request.action === 'captureHtmlAsImage') {
+        (async () => {
+          let newTabId = null;
+          try {
+            const html = request.html;
+            const viewportWidth = request.width || 1400;
+
+            const tab = await chrome.tabs.create({
+              url: 'about:blank',
+              active: true
+            });
+            newTabId = tab.id;
+
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            await chrome.scripting.executeScript({
+              target: { tabId: newTabId },
+              func: (htmlContent, vpWidth) => {
+                document.open();
+                document.write(htmlContent);
+                document.close();
+                if (!document.querySelector('meta[name="viewport"]')) {
+                  const meta = document.createElement('meta');
+                  meta.name = 'viewport';
+                  meta.content = 'width=' + vpWidth;
+                  document.head.appendChild(meta);
+                }
+              },
+              args: [html, viewportWidth]
+            });
+
+            await new Promise(resolve => setTimeout(resolve, 2500));
+
+            await chrome.scripting.executeScript({
+              target: { tabId: newTabId },
+              func: () => document.fonts.ready
+            });
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            const [{ result: dims }] = await chrome.scripting.executeScript({
+              target: { tabId: newTabId },
+              func: () => ({
+                scrollHeight: document.documentElement.scrollHeight,
+                clientWidth: document.documentElement.clientWidth,
+                clientHeight: window.innerHeight
+              })
+            });
+
+            const pageHeight = dims.scrollHeight;
+            const viewportHeight = dims.clientHeight;
+
+            const captures = [];
+            let scrollY = 0;
+
+            while (scrollY < pageHeight) {
+              await chrome.scripting.executeScript({
+                target: { tabId: newTabId },
+                func: (y) => window.scrollTo(0, y),
+                args: [scrollY]
+              });
+              await new Promise(r => setTimeout(r, 400));
+
+              const dataUri = await chrome.tabs.captureVisibleTab(tab.windowId, {
+                format: 'png',
+                quality: 100
+              });
+
+              captures.push({
+                dataUri: dataUri,
+                scrollY: scrollY,
+                viewportHeight: viewportHeight
+              });
+
+              scrollY += viewportHeight;
+              if (captures.length > 30) break;
+            }
+
+            await chrome.tabs.remove(newTabId);
+            newTabId = null;
+
+            if (sender.tab && sender.tab.id) {
+              try { await chrome.tabs.update(sender.tab.id, { active: true }); } catch (e) {}
+            }
+
+            sendResponse({
+              success: true,
+              captures: captures,
+              pageHeight: pageHeight,
+              viewportHeight: viewportHeight,
+              totalCaptures: captures.length
+            });
+
+          } catch (err) {
+            if (newTabId) {
+              try { await chrome.tabs.remove(newTabId); } catch (e) {}
+            }
+            if (sender.tab && sender.tab.id) {
+              try { await chrome.tabs.update(sender.tab.id, { active: true }); } catch (e) {}
+            }
+            sendResponse({ success: false, error: err.message });
+          }
+        })();
+        return true;
+      }
+
       sendResponse({ success: false, error: '알 수 없는 액션' });
     } catch (error) {
       sendResponse({ success: false, error: error.message });

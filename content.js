@@ -913,6 +913,57 @@
     });
   }
 
+  /**
+   * captureVisibleTab 기반 스크린샷 (background.js 경유)
+   */
+  function requestBrowserCapture(htmlStr, sessionKey, blogId, fileName) {
+    return new Promise(function(resolve, reject) {
+      chrome.runtime.sendMessage({
+        action: 'captureHtmlAsImage',
+        html: htmlStr,
+        width: 1400
+      }, function(response) {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (!response || !response.success) {
+          reject(new Error(response ? response.error : '캡처 실패'));
+          return;
+        }
+
+        var requestId = 'cap_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+
+        function onResponse(event) {
+          if (event.detail.requestId !== requestId) return;
+          window.removeEventListener('nbc_response', onResponse);
+          if (event.detail.error) reject(new Error(event.detail.error));
+          else resolve(event.detail.result);
+        }
+        window.addEventListener('nbc_response', onResponse);
+
+        window.dispatchEvent(new CustomEvent('nbc_request', {
+          detail: {
+            action: 'uploadCapturedImage',
+            requestId: requestId,
+            data: {
+              captures: response.captures,
+              pageHeight: response.pageHeight,
+              sessionKey: sessionKey,
+              blogId: blogId,
+              fileName: fileName || 'browser-capture.png'
+            }
+          }
+        }));
+
+        setTimeout(function() {
+          window.removeEventListener('nbc_response', onResponse);
+          reject(new Error('업로드 타임아웃'));
+        }, 120000);
+      });
+    });
+  }
+
   async function convertHtmlToNaverComponents(html, onProgress, mode) {
     function log(msg) {
       console.log(msg);
@@ -955,15 +1006,15 @@
     }
 
     if (mode === 'capture') {
-      log('📷 전체 페이지 캡처 모드...');
-      log('   ⏳ 전체 HTML → 1장 이미지 변환 중...');
+      log('📷 전체 페이지 캡처 모드 (브라우저 렌더링)...');
+      log('   ⏳ 새 탭에서 HTML 렌더링 후 캡처 중...');
       try {
-        var fullResult = await requestFullPageScreenshot(html, '#ffffff', sessionKey, blogId);
-        if (fullResult && fullResult.component) {
-          fullResult.component.represent = true;
-          log('   ✅ 캡처 완료! (' + fullResult.canvasWidth + '×' + fullResult.canvasHeight + ', ' + fullResult.blobSize + 'B)');
+        var captureResult = await requestBrowserCapture(html, sessionKey, blogId, 'full-page.png');
+        if (captureResult && captureResult.component) {
+          captureResult.component.represent = true;
+          log('   ✅ 브라우저 캡처 완료! (' + captureResult.canvasWidth + '×' + captureResult.canvasHeight + ', ' + captureResult.blobSize + 'B)');
           var seoText = body.textContent.replace(/\s+/g, ' ').trim();
-          var components = [fullResult.component];
+          var components = [captureResult.component];
           if (seoText.length > 10) {
             var seoComp = createTextComponent([createParagraph([createTextNode(seoText.substring(0, 2000), { fontSize: 'fs16' })])]);
             components.push(seoComp);
@@ -973,9 +1024,25 @@
           return components;
         }
       } catch (e) {
-        log('❌ 전체 캡처 실패: ' + e.message);
-        log('⚠️ 텍스트 모드로 폴백...');
-        return parseHtmlToComponents(html);
+        log('⚠️ 브라우저 캡처 실패: ' + e.message);
+        log('   🔄 html2canvas 폴백 시도...');
+        try {
+          var fullResult = await requestFullPageScreenshot(html, '#ffffff', sessionKey, blogId);
+          if (fullResult && fullResult.component) {
+            fullResult.component.represent = true;
+            log('   ✅ html2canvas 폴백 캡처 완료!');
+            var seoText2 = body.textContent.replace(/\s+/g, ' ').trim();
+            var components2 = [fullResult.component];
+            if (seoText2.length > 10) {
+              components2.push(createTextComponent([createParagraph([createTextNode(seoText2.substring(0, 2000), { fontSize: 'fs16' })])]));
+            }
+            return components2;
+          }
+        } catch (e2) {
+          log('❌ 폴백도 실패: ' + e2.message);
+          log('⚠️ 텍스트 모드로 전환...');
+          return parseHtmlToComponents(html);
+        }
       }
     }
 

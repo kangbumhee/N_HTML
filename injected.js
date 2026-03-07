@@ -5,7 +5,10 @@
   console.log('✅ [Injected] 네이버 블로그 변환기 주입 스크립트 로드됨');
 
   window.addEventListener('nbc_request', function(event) {
-    const { action, data, requestId } = event.detail;
+    var detail = event.detail;
+    var action = detail.action;
+    var data = detail.data;
+    var requestId = detail.requestId;
     console.log('📨 [Injected] 요청 수신:', action, requestId);
 
     if (action === 'checkEditor') {
@@ -21,20 +24,22 @@
       handleScreenshotAndUpload(data, requestId);
     } else if (action === 'fullPageScreenshot') {
       handleFullPageScreenshot(data, requestId);
+    } else if (action === 'uploadCapturedImage') {
+      handleUploadCapturedImage(data, requestId);
     }
   });
 
   function sendResponse(requestId, result, error) {
     window.dispatchEvent(new CustomEvent('nbc_response', {
-      detail: { requestId, result, error }
+      detail: { requestId: requestId, result: result, error: error }
     }));
   }
 
   function checkNaverEditor() {
-    const mainFrame = document.querySelector('iframe[name="mainFrame"]');
+    var mainFrame = document.querySelector('iframe[name="mainFrame"]');
     if (mainFrame && mainFrame.contentWindow) {
       try {
-        const SE = mainFrame.contentWindow.SE;
+        var SE = mainFrame.contentWindow.SE;
         if (SE && SE.launcher && SE.launcher._editors && SE.launcher._editors.blogpc001) {
           return { found: true, location: 'iframe' };
         }
@@ -109,21 +114,7 @@
     return { success: true, inputCount: components.length, totalCount: newComponents.length, insertedAt: cursorInBody ? 'cursor' : 'end' };
   }
 
-  var html2canvasLoaded = false;
-
-  function ensureHtml2Canvas() {
-    if (html2canvasLoaded || typeof html2canvas !== 'undefined') {
-      html2canvasLoaded = true;
-      return Promise.resolve();
-    }
-    return new Promise(function(resolve, reject) {
-      var s = document.createElement('script');
-      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
-      s.onload = function() { html2canvasLoaded = true; resolve(); };
-      s.onerror = function() { reject(new Error('html2canvas 로드 실패')); };
-      document.head.appendChild(s);
-    });
-  }
+  // ═══════════════════ 업로드 유틸리티 ═══════════════════
 
   function uploadBlob(sessionKey, blogId, blob, fileName) {
     var url = 'https://blog.upphoto.naver.com/' + sessionKey +
@@ -172,6 +163,119 @@
       contentMode: 'fit', origin: { srcFrom: 'local', '@ctype': 'imageOrigin' },
       ai: false, '@ctype': 'image'
     };
+  }
+
+  function dataUriToBlob(dataUri) {
+    var parts = dataUri.split(',');
+    var mime = parts[0].match(/:(.*?);/)[1];
+    var raw = atob(parts[1]);
+    var arr = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return new Blob([arr], { type: mime });
+  }
+
+  async function stitchCaptures(captures, pageHeight) {
+    var firstImg = await loadImage(captures[0].dataUri);
+    var captureWidth = firstImg.width;
+    var vpHeight = captures[0].viewportHeight;
+    var totalHeight = Math.round(pageHeight * (captureWidth / 1400));
+    if (totalHeight > 32767) totalHeight = 32767;
+
+    var canvas = document.createElement('canvas');
+    canvas.width = captureWidth;
+    canvas.height = totalHeight;
+    var ctx = canvas.getContext('2d');
+
+    for (var i = 0; i < captures.length; i++) {
+      var img = i === 0 ? firstImg : await loadImage(captures[i].dataUri);
+      var y = Math.round(captures[i].scrollY * (captureWidth / 1400));
+
+      if (i === captures.length - 1 && captures.length > 1) {
+        var remainingHeight = totalHeight - y;
+        if (remainingHeight < img.height) {
+          var srcY = img.height - remainingHeight;
+          ctx.drawImage(img, 0, srcY, img.width, remainingHeight, 0, y, img.width, remainingHeight);
+        } else {
+          ctx.drawImage(img, 0, y);
+        }
+      } else {
+        ctx.drawImage(img, 0, y);
+      }
+    }
+
+    return new Promise(function(resolve) {
+      canvas.toBlob(function(blob) {
+        resolve({ blob: blob, width: canvas.width, height: canvas.height });
+      }, 'image/png');
+    });
+  }
+
+  function loadImage(src) {
+    return new Promise(function(resolve, reject) {
+      var img = new Image();
+      img.onload = function() { resolve(img); };
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+
+  async function handleUploadCapturedImage(data, requestId) {
+    try {
+      var captures = data.captures;
+      var pageHeight = data.pageHeight;
+      var sessionKey = data.sessionKey;
+      var blogId = data.blogId;
+      var fileName = data.fileName || 'captured-page.png';
+
+      console.log('📸 [Injected] 캡처 이미지 합성 시작 (' + captures.length + '장)');
+
+      var blob;
+      var canvasWidth, canvasHeight;
+
+      if (captures.length === 1) {
+        blob = dataUriToBlob(captures[0].dataUri);
+        var img = await loadImage(captures[0].dataUri);
+        canvasWidth = img.width;
+        canvasHeight = img.height;
+      } else {
+        var stitched = await stitchCaptures(captures, pageHeight);
+        blob = stitched.blob;
+        canvasWidth = stitched.width;
+        canvasHeight = stitched.height;
+      }
+
+      console.log('📸 [Injected] 합성 완료: ' + canvasWidth + '×' + canvasHeight + ', ' + blob.size + 'B');
+
+      var info = await uploadBlob(sessionKey, blogId, blob, fileName);
+      var src = 'https://blogfiles.pstatic.net' + info.url + '?type=w1';
+      await waitCDN(src, 10);
+
+      var comp = makeImageComponent(info);
+      sendResponse(requestId, {
+        success: true, component: comp,
+        blobSize: blob.size, canvasWidth: canvasWidth, canvasHeight: canvasHeight
+      }, null);
+
+    } catch (e) {
+      console.error('❌ [Injected] 캡처 업로드 에러:', e);
+      sendResponse(requestId, null, e.message);
+    }
+  }
+
+  var html2canvasLoaded = false;
+
+  function ensureHtml2Canvas() {
+    if (html2canvasLoaded || typeof html2canvas !== 'undefined') {
+      html2canvasLoaded = true;
+      return Promise.resolve();
+    }
+    return new Promise(function(resolve, reject) {
+      var s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      s.onload = function() { html2canvasLoaded = true; resolve(); };
+      s.onerror = function() { reject(new Error('html2canvas 로드 실패')); };
+      document.head.appendChild(s);
+    });
   }
 
   async function handleScreenshotAndUpload(data, requestId) {
@@ -272,5 +376,5 @@
     }
   }
 
-  console.log('✅ [Injected] 이벤트 리스너 등록 완료 (스크린샷 파이프라인 포함)');
+  console.log('✅ [Injected] 이벤트 리스너 등록 완료 (captureVisibleTab + html2canvas 폴백 파이프라인)');
 })();
