@@ -305,20 +305,32 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true; // 비동기 응답
       }
 
-      // ═══════════════════ captureHtmlAsImage (capture.html + sendMessage, executeScript 미사용) ═══════════════════
       if (request.action === 'captureHtmlAsImage') {
         (async () => {
-          let newTabId = null;
+          let newWindowId = null;
+          let originalWindowId = null;
           try {
-            const html = request.html;
+            const tabUrl = request.tabUrl;
+            if (!tabUrl) throw new Error('tabUrl이 없습니다');
 
-            const captureUrl = chrome.runtime.getURL('capture.html');
-            const tab = await chrome.tabs.create({
-              url: captureUrl,
-              active: true
+            // 원래 창 저장
+            if (sender.tab) {
+              originalWindowId = sender.tab.windowId;
+            }
+
+            // 1) 팝업 창으로 열기 (화면 안에 들어가는 크기)
+            const win = await chrome.windows.create({
+              url: tabUrl,
+              type: 'popup',
+              width: 780,
+              height: 900,
+              left: 0,
+              top: 0
             });
-            newTabId = tab.id;
+            newWindowId = win.id;
+            const newTabId = win.tabs[0].id;
 
+            // 2) 로딩 완료 대기
             await new Promise((resolve) => {
               const listener = (tabId, info) => {
                 if (tabId === newTabId && info.status === 'complete') {
@@ -328,39 +340,82 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               };
               chrome.tabs.onUpdated.addListener(listener);
             });
-            await new Promise(r => setTimeout(r, 800));
 
-            const renderResult = await chrome.tabs.sendMessage(newTabId, {
-              action: 'renderHtml',
-              html: html
-            });
+            // 3) 렌더링 대기
+            await new Promise(r => setTimeout(r, 5000));
 
-            if (!renderResult || !renderResult.ok) {
-              throw new Error('렌더링 실패: ' + (renderResult ? renderResult.error : 'no response'));
-            }
+            // 3.5) 스크롤바 숨기기 + 콘텐츠 맞춤 + 폰트 대기
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: newTabId },
+                func: () => {
+                  return new Promise((resolve) => {
+                    var style = document.createElement('style');
+                    style.textContent =
+                      '*, *::before, *::after { scrollbar-width: none !important; -ms-overflow-style: none !important; }' +
+                      '*::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }' +
+                      'html, body { overflow-y: scroll !important; scrollbar-width: none !important; overflow-x: hidden !important; }' +
+                      'html::-webkit-scrollbar, body::-webkit-scrollbar { display: none !important; width: 0 !important; }' +
+                      'img, video, canvas, svg, iframe { max-width: 100% !important; height: auto !important; }' +
+                      '.card-container, .glass-section, .neon-section, .flip-card { max-width: 100% !important; }' +
+                      '.flip-card { width: 160px !important; height: 220px !important; }' +
+                      'body { max-width: 100vw !important; overflow-x: hidden !important; }';
+                    document.head.appendChild(style);
 
-            const pageHeight = renderResult.scrollHeight;
-            const viewportHeight = renderResult.clientHeight;
+                    var meta = document.querySelector('meta[name="viewport"]');
+                    if (!meta) {
+                      meta = document.createElement('meta');
+                      meta.name = 'viewport';
+                      document.head.appendChild(meta);
+                    }
+                    meta.content = 'width=device-width, initial-scale=1.0';
 
-            await new Promise(r => setTimeout(r, 500));
+                    if (document.fonts && document.fonts.ready) {
+                      document.fonts.ready.then(function() { resolve(true); });
+                      setTimeout(function() { resolve(true); }, 5000);
+                    } else {
+                      resolve(true);
+                    }
+                  });
+                }
+              });
+            } catch (e) {}
 
+            // 4) 페이지 높이 측정
+            let pageHeight = 900;
+            let viewportHeight = 900;
+            try {
+              const [{ result: dims }] = await chrome.scripting.executeScript({
+                target: { tabId: newTabId },
+                func: () => ({
+                  scrollHeight: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
+                  clientHeight: window.innerHeight
+                })
+              });
+              pageHeight = dims.scrollHeight;
+              viewportHeight = dims.clientHeight;
+            } catch (e) {}
+
+            // 5) 스크롤하며 캡처
             const captures = [];
             let scrollY = 0;
 
             while (scrollY < pageHeight) {
-              await chrome.tabs.sendMessage(newTabId, {
-                action: 'scrollTo',
-                y: scrollY
-              });
-              await new Promise(r => setTimeout(r, 1500));
+              try {
+                await chrome.scripting.executeScript({
+                  target: { tabId: newTabId },
+                  func: (y) => window.scrollTo(0, y),
+                  args: [scrollY]
+                });
+              } catch (e) { break; }
 
-              const dataUri = await chrome.tabs.captureVisibleTab(tab.windowId, {
+              // 렌더링 안정화 대기
+              await new Promise(r => setTimeout(r, 800));
+
+              const dataUri = await chrome.tabs.captureVisibleTab(newWindowId, {
                 format: 'png',
                 quality: 100
               });
-
-              // 렌더링 대기
-              await new Promise(r => setTimeout(r, 500));
 
               captures.push({
                 dataUri: dataUri,
@@ -368,18 +423,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 viewportHeight: viewportHeight
               });
 
-              // 캡처 간 rate limit 방지
-              await new Promise(r => setTimeout(r, 1000));
-
-              scrollY += viewportHeight;
+              scrollY += viewportHeight - 10;
               if (captures.length > 30) break;
+
+              // rate limit 방지
+              if (scrollY < pageHeight) {
+                await new Promise(r => setTimeout(r, 500));
+              }
             }
 
-            await chrome.tabs.remove(newTabId);
-            newTabId = null;
+            // 6) 창 닫기
+            await chrome.windows.remove(newWindowId);
+            newWindowId = null;
 
-            if (sender.tab && sender.tab.id) {
-              try { await chrome.tabs.update(sender.tab.id, { active: true }); } catch (e) {}
+            // 7) 원래 창 포커스
+            if (originalWindowId) {
+              try { await chrome.windows.update(originalWindowId, { focused: true }); } catch (e) {}
             }
 
             sendResponse({
@@ -391,11 +450,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             });
 
           } catch (err) {
-            if (newTabId) {
-              try { await chrome.tabs.remove(newTabId); } catch (e) {}
+            if (newWindowId) {
+              try { await chrome.windows.remove(newWindowId); } catch (e) {}
             }
-            if (sender.tab && sender.tab.id) {
-              try { await chrome.tabs.update(sender.tab.id, { active: true }); } catch (e) {}
+            if (originalWindowId) {
+              try { await chrome.windows.update(originalWindowId, { focused: true }); } catch (e) {}
             }
             sendResponse({ success: false, error: err.message });
           }

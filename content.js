@@ -927,16 +927,22 @@
     });
   }
 
-  /**
-   * captureVisibleTab 기반 스크린샷 (background.js 경유)
-   */
   function requestBrowserCapture(htmlStr, sessionKey, blogId, fileName) {
     return new Promise(function(resolve, reject) {
+      // 1) blob URL 생성 (content script에서 만들어야 함)
+      var blob = new Blob([htmlStr], {type: 'text/html'});
+      var blobUrl = URL.createObjectURL(blob);
+
+      // 2) background.js에 blob URL 전달하여 캡처
       chrome.runtime.sendMessage({
         action: 'captureHtmlAsImage',
+        tabUrl: blobUrl,
         html: htmlStr,
         width: 1400
       }, function(response) {
+        // blob URL 정리
+        URL.revokeObjectURL(blobUrl);
+
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
           return;
@@ -946,6 +952,7 @@
           return;
         }
 
+        // 3) 캡처된 이미지를 injected.js에 전달하여 업로드
         var requestId = 'cap_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
 
         function onResponse(event) {
@@ -1075,12 +1082,20 @@
     async function screenshotBlock(blockHtml, fileName, bgColor) {
       screenshotIdx++;
       if (!fileName) fileName = 'section-' + screenshotIdx + '.png';
-      // log(문자열 + fileName); — fileName 뒤 불필요한 ' 없음
       log('   📸 스크린샷: ' + fileName);
+
+      // 배경색 자동 감지
+      if (!bgColor) {
+        var bgMatch = stylePrefix.match(/body\s*\{[^}]*background\s*:\s*([^;}\s]+)/i);
+        if (bgMatch) bgColor = bgMatch[1];
+        else bgColor = '#0a0a0f';
+      }
+
       var fullHtml = '<html><head><meta charset="UTF-8">' + linkPrefix + stylePrefix +
-        '</head><body style="margin:0;padding:0;' + (bgColor ? 'background:' + bgColor + ';' : '') + '">' +
-        blockHtml + '</body></html>';
-      var result = await requestScreenshot(fullHtml, fileName, bgColor || '#0a0a0f', sessionKey, blogId);
+        '<style>body{margin:0;padding:20px;background:' + bgColor + ';}</style>' +
+        '</head><body>' + blockHtml + '</body></html>';
+
+      var result = await requestScreenshot(fullHtml, fileName, bgColor, sessionKey, blogId);
       if (result && result.component) {
         log('   ✅ 완료 (' + result.canvasWidth + '×' + result.canvasHeight + ', ' + result.blobSize + 'B)');
         return result.component;
@@ -1101,13 +1116,41 @@
       return createTextComponent([createParagraph(nodes)]);
     }
 
-    for (var i = 0; i < children.length; i++) {
-      var child = children[i];
+    // 컨테이너 재귀 분해
+    function flattenChildren(elements) {
+      var result = [];
+      for (var fi = 0; fi < elements.length; fi++) {
+        var fc = elements[fi];
+        var fcTag = fc.tagName ? fc.tagName.toUpperCase() : '';
+        var shouldFlatten = false;
+        // article, main, section(자식 많은 경우), 큰 div는 분해
+        if (fcTag === 'ARTICLE' || fcTag === 'MAIN') shouldFlatten = true;
+        if (fcTag === 'DIV' && fc.children && fc.children.length > 5) shouldFlatten = true;
+        if (fcTag === 'SECTION' && fc.children && fc.children.length > 3) shouldFlatten = true;
+
+        if (shouldFlatten && fc.children && fc.children.length > 1) {
+          log('📂 <' + fcTag + (fc.className ? '.' + String(fc.className).split(' ')[0] : '') + '> 분해 → ' + fc.children.length + '개');
+          var subResult = flattenChildren(Array.from(fc.children));
+          for (var si = 0; si < subResult.length; si++) {
+            result.push(subResult[si]);
+          }
+        } else {
+          result.push(fc);
+        }
+      }
+      return result;
+    }
+    var flatChildren = flattenChildren(children);
+
+    log('📋 처리 대상 요소: ' + flatChildren.length + '개');
+
+    for (var i = 0; i < flatChildren.length; i++) {
+      var child = flatChildren[i];
       var tag = child.tagName ? child.tagName.toUpperCase() : '';
 
       if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META' || tag === 'NOSCRIPT') continue;
 
-      log('\n📌 [' + (i + 1) + '/' + children.length + '] <' + tag + (child.className ? '.' + String(child.className).split(' ')[0] : '') + '>');
+      log('\n📌 [' + (i + 1) + '/' + flatChildren.length + '] <' + tag + (child.className ? '.' + String(child.className).split(' ')[0] : '') + '>');
 
         var childText = child.textContent.replace(/\s+/g, ' ').trim();
         var childStyle = child.getAttribute('style') || '';
@@ -1115,16 +1158,35 @@
         var childInner = child.innerHTML || '';
 
         var isVisual = false;
-        if (/hero|stats|grid|card|highlight|banner|gradient|glass|neon|timeline|meta|author/i.test(childClass)) isVisual = true;
+
+        // 스타일 태그가 있는 HTML에서는 DIV를 기본적으로 시각적으로 판단
+        if (hasStyleTag || hasCSSVars) {
+          if (tag === 'DIV' || tag === 'SECTION') {
+            if (child.children && child.children.length > 0) {
+              isVisual = true;
+            } else if (childClass && childClass.length > 0) {
+              isVisual = true;
+            }
+          }
+        }
+
+        // 클래스 기반 강제 시각적
+        if (/hero|stats|grid|card|highlight|banner|gradient|glass|neon|timeline|orbit|flip|wave|typing|progress|quote|inv-|tl-|table-wrap|disclaimer|cta|footer-note|tags|meta|author/i.test(childClass)) isVisual = true;
+        // 인라인 스타일 기반
         if (/gradient|flex|grid|animation|transform|clip-path|backdrop|border-radius/i.test(childStyle)) isVisual = true;
+        // 자식 요소 감지
         if (child.querySelector && (
-          child.querySelector('.hero, .stats-grid, .stat-item, .highlight-card, .tags, .scroll-indicator, .author-avatar, .avatar') ||
           child.querySelector('svg, canvas, video, progress, meter') ||
-          child.querySelector('[class*="grid"], [class*="flex"], [class*="card"], [class*="stat"], [class*="hero"]')
+          child.querySelector('[class*="grid"], [class*="flex"], [class*="card"]')
         )) isVisual = true;
-        if (/display\s*:\s*(flex|grid)/i.test(childInner) || /display\s*:\s*(flex|grid)/i.test(childStyle)) isVisual = true;
-        if ((tag === 'SECTION' || tag === 'ARTICLE' || tag === 'DIV') && child.children && child.children.length > 0) {
-          if (/stat-|grid|hero|highlight|card|avatar|scroll-indicator|tags|meta/i.test(childInner)) isVisual = true;
+
+        // 단순 텍스트 요소는 시각적에서 제외 (P, H1~H6, UL, OL, HR, A 등)
+        if (/^(P|H[1-6]|UL|OL|LI|HR|A|PRE|CODE|DL|DT|DD)$/.test(tag)) {
+          isVisual = false;
+        }
+        // BLOCKQUOTE는 스타일 있으면 시각적
+        if (tag === 'BLOCKQUOTE' && (hasStyleTag || hasCSSVars)) {
+          isVisual = true;
         }
 
         if (isVisual && (hasStyleTag || hasCSSVars)) {
@@ -1141,18 +1203,18 @@
           }
 
           if (childText.length > 10) {
-            var subElements = child.querySelectorAll ? child.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,span,div') : [];
-            var seoAdded = false;
+            var seenTexts = {};
+            var subElements = child.querySelectorAll ? child.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote') : [];
             subElements.forEach(function(sub) {
               var subText = sub.textContent.replace(/\s+/g, ' ').trim();
-              if (subText.length > 10) {
-                if (subText === childText && subElements.length > 1) return;
+              if (subText.length > 10 && !seenTexts[subText]) {
+                seenTexts[subText] = true;
                 var seoComp = extractSeoText(sub);
-                if (seoComp) { components.push(seoComp); seoAdded = true; }
+                if (seoComp) { components.push(seoComp); }
               }
             });
-            if (!seoAdded && childText.length > 10) {
-              components.push(createTextComponent([createParagraph([createTextNode(childText, { fontSize: 'fs16' })])]));
+            if (Object.keys(seenTexts).length === 0 && childText.length > 10) {
+              components.push(createTextComponent([createParagraph([createTextNode(childText.substring(0, 500), { fontSize: 'fs16' })])]));
             }
             log('   📝 SEO 텍스트 추가');
           }
