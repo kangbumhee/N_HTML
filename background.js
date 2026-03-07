@@ -305,7 +305,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true; // 비동기 응답
       }
 
-      // ═══════════════════ captureHtmlAsImage (확장 페이지 capture.html + captureVisibleTab) ═══════════════════
+      // ═══════════════════ captureHtmlAsImage (capture.html + sendMessage, executeScript 미사용) ═══════════════════
       if (request.action === 'captureHtmlAsImage') {
         (async () => {
           let newTabId = null;
@@ -328,49 +328,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               };
               chrome.tabs.onUpdated.addListener(listener);
             });
+            await new Promise(r => setTimeout(r, 800));
 
-            await new Promise(r => setTimeout(r, 500));
-
-            await chrome.scripting.executeScript({
-              target: { tabId: newTabId },
-              func: (htmlContent) => {
-                document.open();
-                document.write(htmlContent);
-                document.close();
-              },
-              args: [html]
+            const renderResult = await chrome.tabs.sendMessage(newTabId, {
+              action: 'renderHtml',
+              html: html
             });
 
-            await new Promise(r => setTimeout(r, 3000));
+            if (!renderResult || !renderResult.ok) {
+              throw new Error('렌더링 실패: ' + (renderResult ? renderResult.error : 'no response'));
+            }
 
-            try {
-              await chrome.scripting.executeScript({
-                target: { tabId: newTabId },
-                func: () => document.fonts.ready
-              });
-            } catch (e) {}
+            const pageHeight = renderResult.scrollHeight;
+            const viewportHeight = renderResult.clientHeight;
 
             await new Promise(r => setTimeout(r, 500));
-
-            const [{ result: dims }] = await chrome.scripting.executeScript({
-              target: { tabId: newTabId },
-              func: () => ({
-                scrollHeight: document.documentElement.scrollHeight,
-                clientHeight: window.innerHeight
-              })
-            });
-
-            const pageHeight = dims.scrollHeight;
-            const viewportHeight = dims.clientHeight;
 
             const captures = [];
             let scrollY = 0;
 
             while (scrollY < pageHeight) {
-              await chrome.scripting.executeScript({
-                target: { tabId: newTabId },
-                func: (y) => window.scrollTo(0, y),
-                args: [scrollY]
+              await chrome.tabs.sendMessage(newTabId, {
+                action: 'scrollTo',
+                y: scrollY
               });
               await new Promise(r => setTimeout(r, 400));
 
