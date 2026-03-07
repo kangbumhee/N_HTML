@@ -96,11 +96,26 @@ service cloud.firestore {
 
 ## 지원하는 HTML 요소
 
+### 텍스트로 변환
 - 텍스트: `<p>`, `<div>`, `<h1>`~`<h6>`, `<span>`, `<li>`
-- 스타일: `<strong>`, `<b>`, `<em>`, `<i>`, `<u>`, `<s>`, `<del>`
-- 링크: `<a href>`
+- 스타일: `<strong>`, `<b>`, `<em>`, `<i>`, `<u>`, `<s>`, `<del>`, `<mark>`, `<small>`, `<code>`, `<kbd>`
+- 링크: `<a href>` (OG 링크 카드)
 - 표: `<table>`, `<tr>`, `<td>`, `<th>`
 - 구분선: `<hr>`
+- 인용문: `<blockquote>`
+- 목록: `<ul>`, `<ol>`, `<li>`, `<dl>`
+- 코드: `<pre>`, `<code>`
+
+### 이미지(스크린샷)로 변환
+- 미디어: `<img>` (네이버 서버 re-upload), `<svg>`, `<canvas>`, `<video>` (썸네일)
+- 시각 요소: `<figure>`, `<details>`, `<progress>`, `<meter>`
+- CSS 효과: gradient, flex, grid, filter, transform, animation, box-shadow, clip-path, backdrop-filter 등
+- 복잡한 레이아웃 및 다크/라이트 테마 전체
+
+### 자동 최적화
+- 이미지·텍스트 교차 배치 (네이버 SEO 최적화)
+- 첫 이미지 대표 이미지 자동 설정
+- CDN 전파 대기 후 삽입 (이미지 깨짐 방지)
 
 ## 문의
 

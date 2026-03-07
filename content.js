@@ -2032,8 +2032,8 @@
   function updateStatus(message) {
     var statusEl = container ? container.querySelector('#nbc-status') : null;
     if (statusEl) {
-      statusEl.textContent = message;
-      statusEl.style.display = message ? 'block' : 'none';
+      statusEl.textContent = message || '이미지+텍스트 자동 혼합 변환 지원';
+      statusEl.style.display = 'block';
     }
     if (message) console.log('[변환기]', message);
   }
@@ -3020,11 +3020,9 @@
           <button class="nbc-btn-clear" id="nbc-clear">🗑️ 지우기</button>
           <button class="nbc-btn-convert" id="nbc-convert">📤 블로그에 삽입</button>
         </div>
-        <div id="nbc-status" style="display:none;padding:8px 12px;margin:8px 0;background:#EEF2FF;border-radius:6px;font-size:12px;color:#4338CA;text-align:center;"></div>
-        <div style="padding:8px 12px;margin:4px 0;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;font-size:11px;color:#166534;line-height:1.5;">
-          ✅ <b>이미지 자동 변환</b>: CSS 꾸미기, 그라디언트, 플렉스 레이아웃 등이 포함된 HTML은 자동으로 스크린샷 이미지로 변환되어 네이버 에디터에 삽입됩니다.<br>
-          📝 <b>텍스트 자동 추출</b>: 이미지 사이에 SEO용 텍스트가 자동으로 배치됩니다.<br>
-          💡 <b>네이버 글쓰기 페이지</b>에서 실행해야 이미지 업로드가 작동합니다.
+        <div id="nbc-status" style="padding:8px 12px;font-size:12px;color:#6B7280;text-align:center;min-height:20px;">이미지+텍스트 자동 혼합 변환 지원</div>
+        <div style="padding:6px 12px;font-size:11px;color:#9CA3AF;text-align:center;background:#F0F9FF;border-radius:6px;margin:4px 8px;">
+          📌 HTML을 넣으면 이미지·텍스트가 자동 배치되어<br>네이버 에디터에 바로 삽입됩니다
         </div>
         
         <div class="nbc-footer">
@@ -3704,11 +3702,22 @@
         });
       } catch (e) {
         console.warn('이미지 포함 변환 실패, 기존 방식으로 대체:', e.message);
-        updateStatus('');
-        components = parseHtmlToComponents(htmlToConvert);
+        updateStatus('⚠️ 이미지 없이 텍스트만 변환합니다...');
+        try {
+          components = parseHtmlToComponents(htmlToConvert);
+        } catch (e2) {
+          updateStatus('❌ 실패: ' + e2.message);
+          showToast('변환 실패: ' + e2.message, 'error');
+          if (convertBtn) { convertBtn.disabled = false; convertBtn.textContent = '📤 블로그에 삽입'; }
+          return;
+        }
+        if (components && components.length > 0) {
+          updateStatus('⚠️ 이미지 없이 텍스트만 삽입됨');
+        }
       }
-      
+
       if (!components || components.length === 0) {
+        updateStatus('변환할 내용이 없습니다.');
         showToast('변환할 내용이 없습니다.', 'warning');
         if (convertBtn) {
           convertBtn.disabled = false;
@@ -3716,16 +3725,16 @@
         }
         return;
       }
-      
+
       // 네이버 에디터에 삽입
       await insertToNaverEditor(components);
-      
+
       // 사용량 증가
       const response = await sendMessage('useConversion');
       if (response.success) {
         currentUsage = response.usage;
         updateState();
-        updateStatus('');
+        updateStatus('✅ 삽입 완료! (' + components.length + '개 컴포넌트)');
         showToast('✅ 블로그에 삽입되었습니다!', 'success');
         
         // 입력 영역 초기화
