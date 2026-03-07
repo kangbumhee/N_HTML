@@ -1198,7 +1198,6 @@
             components.push(createTextComponent([createParagraph(tN, getAlignment(child))]));
             log('   📝 텍스트');
           }
-        }
       }
     }
 
